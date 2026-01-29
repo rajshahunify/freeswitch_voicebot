@@ -1,0 +1,14 @@
+[Unit]
+Description=FreeSWITCH VoiceBot Agent
+After=network.target freeswitch.service voicebot-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/c/Users/unify/freeswitch_voicebot
+ExecStart=/mnt/c/Users/unify/freeswitch_voicebot/venv/bin/python agent.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
