@@ -188,7 +188,7 @@ DF_ATTENUATION_LIMIT = 100  # dB - maximum noise reduction
 
 # Performance
 DF_USE_GPU = False  # Set to True if CUDA available in WSL
-DF_POST_FILTER = True  # Additional perceptual enhancement
+DF_POST_FILTER = False  # Additional perceptual enhancement
 
 # =============================================================================
 # SILERO VAD (VOICE ACTIVITY DETECTION) CONFIGURATION
