@@ -22,3 +22,6 @@ python-Levenshtein
 
 # Utilities
 python-multipart
+
+# Audio resampling (CRITICAL for improved NC)
+resampy

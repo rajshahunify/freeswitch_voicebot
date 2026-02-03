@@ -329,14 +329,14 @@ DF_MODEL = 'DeepFilterNet2'
 # Processing settings
 DF_FRAME_SIZE = CHUNK_SIZE  # Process in 32ms chunks
 DF_COMPENSATE_DELAY = True  # Compensate for processing delay
-DF_ATTENUATION_LIMIT = 12.0  # dB - REDUCED from 100 to preserve voice quality
+DF_ATTENUATION_LIMIT = 6.0  # dB - REDUCED from 100 to preserve voice quality
 
 # Performance
 DF_USE_GPU = False  # Set to True if CUDA available in WSL
 DF_POST_FILTER = False  # Additional perceptual enhancement (disabled for speed)
 
 # Volume boost to compensate for NC reducing amplitude
-DF_GAIN = 2.0  # 2.5x volume boost after noise cancellation
+DF_GAIN = 4.0  # 2.5x volume boost after noise cancellation
 
 # Debug settings - Enable to save before/after audio files
 DF_DEBUG_RMS = True  # Log RMS values to see volume changes
@@ -347,7 +347,7 @@ DF_DEBUG_SAVE_DIR = "debug_audio"  # Directory to save debug audio files (set to
 # =============================================================================
 # Thresholds
 VAD_THRESHOLD = 0.3  # Speech probability threshold (0.0-1.0)
-VAD_MIN_SPEECH_DURATION_MS = 250  # Minimum speech duration to consider (reduced for faster start)
+VAD_MIN_SPEECH_DURATION_MS = 200  # Minimum speech duration to consider (reduced for faster start)
 VAD_MIN_SILENCE_DURATION_MS = 1500  # INCREASED: Silence duration before speech end (was 800ms, now 1500ms to prevent cutoff)
 VAD_SPEECH_PAD_MS = 30  # Padding before/after speech
 

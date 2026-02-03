@@ -3,10 +3,11 @@ Audio Pipeline Module
 Complete audio processing pipeline: Noise Cancellation → VAD → Buffering
 """
 
-from .noise_canceller import (
-    NoiseCanceller,
-    get_noise_canceller,
-    denoise_audio
+from .improved_noise_canceller import (
+    ImprovedNoiseCanceller,
+    get_improved_noise_canceller,
+    denoise_utterance,
+    _improved_nc_instance
 )
 
 from .vad_detector import (
@@ -23,9 +24,10 @@ from .audio_buffer import (
 
 __all__ = [
     # Noise Cancellation
-    'NoiseCanceller',
-    'get_noise_canceller',
-    'denoise_audio',
+    'ImprovedNoiseCanceller',
+    'get_improved_noise_canceller',
+    'denoise_utterance',
+    '_improved_nc_instance',
     
     # VAD
     'VADDetector',
