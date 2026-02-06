@@ -5,3 +5,7 @@ logs/
 debug_audio/
 nc_20260130T111402605_6_orig.wav
 nc_20260130T111405024_6_proc.wav
+server_multicall.py
+test_redis.py
+simple_server.py
+audio_pipeline/noise_canceller.py

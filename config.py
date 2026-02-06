@@ -419,6 +419,17 @@ MAX_WORKERS = 4  # For CPU-intensive tasks (NC, VAD)
 # Cache settings
 CACHE_MODELS = True  # Keep models in memory between calls
 
+# Redis Configuration
+REDIS_HOST = '127.0.0.1'
+REDIS_PORT = 6379
+REDIS_DB = 0
+SESSION_TTL = 3600
+
+# Worker Configuration
+WORKER_ID = f"worker-{os.getpid()}"
+MAX_CONCURRENT_CALLS = 5
+SESSION_CLEANUP_INTERVAL = 300
+
 # =============================================================================
 # PATHS
 # =============================================================================

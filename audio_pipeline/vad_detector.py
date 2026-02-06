@@ -250,7 +250,6 @@ def get_vad_detector(
     
     return _vad_instance
 
-
 # =============================================================================
 # CONVENIENCE FUNCTIONS
 # =============================================================================
@@ -267,3 +266,147 @@ def detect_speech(audio_chunk: bytes) -> Tuple[bool, float]:
     """
     vad = get_vad_detector()
     return vad.process_chunk(audio_chunk)
+
+
+"""
+Per-Call VAD Manager
+Manages separate VAD instances for each concurrent call
+Fixes the VAD state collision bug in multi-call scenarios
+"""
+
+import logging
+from typing import Dict, Optional
+from audio_pipeline.vad_detector import VADDetector
+
+logger = logging.getLogger(__name__)
+
+
+class PerCallVADManager:
+    """
+    Manages separate VAD instances for each call
+    
+    This fixes the critical bug where multiple concurrent calls
+    share the same VAD state, causing crashes.
+    
+    Each call gets its own VAD instance with isolated state.
+    """
+    
+    def __init__(self,
+                 threshold: float = 0.5,
+                 min_speech_duration_ms: int = 250,
+                 min_silence_duration_ms: int = 300,
+                 sample_rate: int = 16000,
+                 window_size: int = 512):
+        """
+        Initialize VAD manager
+        
+        Args:
+            threshold: Speech probability threshold
+            min_speech_duration_ms: Minimum speech duration
+            min_silence_duration_ms: Silence before speech end
+            sample_rate: Audio sample rate
+            window_size: Samples per window
+        """
+        self.threshold = threshold
+        self.min_speech_duration_ms = min_speech_duration_ms
+        self.min_silence_duration_ms = min_silence_duration_ms
+        self.sample_rate = sample_rate
+        self.window_size = window_size
+        
+        # Dictionary to store VAD instances per call
+        self.vad_instances: Dict[str, VADDetector] = {}
+        
+        logger.info(f"PerCallVADManager initialized (threshold={threshold})")
+    
+    def get_vad(self, call_uuid: str) -> VADDetector:
+        """
+        Get or create VAD instance for a specific call
+        
+        Args:
+            call_uuid: Unique call identifier
+            
+        Returns:
+            VADDetector instance for this call
+        """
+        if call_uuid not in self.vad_instances:
+            logger.debug(f"Creating new VAD instance for call {call_uuid}")
+            
+            vad = VADDetector(
+                threshold=self.threshold,
+                min_speech_duration_ms=self.min_speech_duration_ms,
+                min_silence_duration_ms=self.min_silence_duration_ms,
+                sample_rate=self.sample_rate,
+                window_size=self.window_size
+            )
+            
+            # Load model (shared weights, but separate state)
+            vad.load_model()
+            
+            # Reset state for this call
+            vad.reset_state()
+            
+            self.vad_instances[call_uuid] = vad
+            logger.info(f"✓ VAD instance created for call {call_uuid}")
+        
+        return self.vad_instances[call_uuid]
+    
+    def remove_vad(self, call_uuid: str):
+        """
+        Remove VAD instance for ended call
+        
+        Args:
+            call_uuid: Call identifier to remove
+        """
+        if call_uuid in self.vad_instances:
+            # Cleanup
+            vad = self.vad_instances[call_uuid]
+            try:
+                del vad
+            except:
+                pass
+            
+            del self.vad_instances[call_uuid]
+            logger.debug(f"Removed VAD instance for call {call_uuid}")
+    
+    def reset_vad(self, call_uuid: str):
+        """
+        Reset VAD state for a call
+        
+        Args:
+            call_uuid: Call identifier
+        """
+        if call_uuid in self.vad_instances:
+            self.vad_instances[call_uuid].reset_state()
+            logger.debug(f"Reset VAD state for call {call_uuid}")
+    
+    def get_stats(self) -> dict:
+        """Get VAD manager statistics"""
+        return {
+            'active_vad_instances': len(self.vad_instances),
+            'call_uuids': list(self.vad_instances.keys())
+        }
+    
+    def active_count(self) -> int:
+        """Get count of active VAD instances"""
+        return len(self.vad_instances)
+
+
+# =============================================================================
+# SINGLETON INSTANCE
+# =============================================================================
+_vad_manager_instance: Optional[PerCallVADManager] = None
+
+
+def get_vad_manager(**kwargs) -> PerCallVADManager:
+    """
+    Get or create shared PerCallVADManager instance
+    
+    Returns:
+        Shared PerCallVADManager instance
+    """
+    global _vad_manager_instance
+    
+    if _vad_manager_instance is None:
+        _vad_manager_instance = PerCallVADManager(**kwargs)
+    
+    return _vad_manager_instance

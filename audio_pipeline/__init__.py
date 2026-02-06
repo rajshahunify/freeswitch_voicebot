@@ -11,9 +11,9 @@ from .improved_noise_canceller import (
 )
 
 from .vad_detector import (
-    VADDetector,
-    get_vad_detector,
-    detect_speech
+    PerCallVADManager,
+    get_vad_manager,
+    VADDetector
 )
 
 from .audio_buffer import (
@@ -30,9 +30,10 @@ __all__ = [
     '_improved_nc_instance',
     
     # VAD
-    'VADDetector',
-    'get_vad_detector',
+    'PerCallVADManager',
+    'get_vad_manager',
     'detect_speech',
+    'VADDetector',
     
     # Buffering
     'AudioBuffer',
