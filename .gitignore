@@ -9,3 +9,4 @@ server_multicall.py
 test_redis.py
 simple_server.py
 audio_pipeline/noise_canceller.py
+setup/
