@@ -2533,7 +2533,6 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import asyncio
 import logging
-import subprocess
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -2549,7 +2548,7 @@ from audio_pipeline import (
 from ivr import IntentMatcher, ResponseHandler
 from stt_handler import STTHandler
 from session_manager import get_session_manager
- # NEW: Per-call VAD
+from esl_manager import get_esl_manager
 
 # =============================================================================
 # LOGGING SETUP
@@ -2586,14 +2585,15 @@ session_manager = get_session_manager(
     redis_host=config.REDIS_HOST,
     redis_port=config.REDIS_PORT,
     redis_db=config.REDIS_DB,
-    session_ttl=config.SESSION_TTL
+    session_ttl=config.SESSION_TTL,
+    key_prefix=config.REDIS_KEY_PREFIX
 )
 
 # Track active WebSocket connections
 active_connections: Dict[str, WebSocket] = {}
 
 logger.info("=" * 60)
-logger.info("🚀 Initializing VoiceBot Components (Multi-Call FIXED)")
+logger.info("🚀 Initializing VoiceBot Components (Multi-Call FIXED + ESL)")
 logger.info("=" * 60)
 
 # Audio processing pipeline (shared across all calls)
@@ -2624,6 +2624,13 @@ buffer_manager = CallAudioManager(
 )
 
 # IVR components (shared)
+# ESL Manager (replaces all fs_cli subprocess calls)
+esl = get_esl_manager(
+    host=config.FREESWITCH_HOST,
+    port=config.FREESWITCH_PORT,
+    password=config.FREESWITCH_PASSWORD
+)
+
 intent_matcher = IntentMatcher(
     intent_keywords=config.INTENT_KEYWORDS,
     fuzzy_threshold=config.FUZZY_MATCH_THRESHOLD
@@ -2632,6 +2639,7 @@ intent_matcher = IntentMatcher(
 response_handler = ResponseHandler(
     audio_base_path=config.AUDIO_BASE_PATH,
     allow_interruptions=config.ALLOW_INTERRUPTIONS,
+    esl_manager=esl,
     speaking_timeout=config.BOT_SPEAKING_TIMEOUT
 )
 
@@ -2646,6 +2654,7 @@ logger.info("✓ All components initialized")
 logger.info(f"✓ Worker ID: {config.WORKER_ID}")
 logger.info(f"✓ Max concurrent calls: {config.MAX_CONCURRENT_CALLS}")
 logger.info(f"✓ Per-call VAD: ENABLED (crash fix)")
+logger.info(f"✓ ESL Manager: persistent connection (replaces fs_cli)")
 if config.DF_DEBUG_SAVE_DIR:
     logger.info(f"📁 Debug audio files will be saved to: {config.DF_DEBUG_SAVE_DIR}")
 logger.info("=" * 60)
@@ -2655,28 +2664,24 @@ logger.info("=" * 60)
 # =============================================================================
 
 async def get_active_call_uuid(retries: int = 10, delay: float = 0.2) -> Optional[str]:
-    """Get the most recent active call UUID from FreeSWITCH"""
+    """Get the most recent active call UUID from FreeSWITCH via ESL"""
     for i in range(retries):
         try:
-            cmd = ["fs_cli", "-x", "show channels as json"]
-            process = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
-            output = process.stdout.strip()
+            data = esl.show_channels_json()
             
-            if output:
-                data = json.loads(output)
-                if data and "rows" in data and len(data["rows"]) > 0:
-                    sorted_calls = sorted(
-                        data["rows"],
-                        key=lambda x: x.get('created_epoch', 0),
-                        reverse=True
-                    )
-                    
-                    for call in sorted_calls:
-                        uuid = call["uuid"]
-                        if uuid not in active_connections:
-                            return uuid
-                    
-                    return sorted_calls[0]["uuid"]
+            if data and "rows" in data and len(data["rows"]) > 0:
+                sorted_calls = sorted(
+                    data["rows"],
+                    key=lambda x: x.get('created_epoch', 0),
+                    reverse=True
+                )
+                
+                for call in sorted_calls:
+                    uuid = call["uuid"]
+                    if uuid not in active_connections:
+                        return uuid
+                
+                return sorted_calls[0]["uuid"]
         except Exception as e:
             logger.debug(f"Attempt {i+1}/{retries} to get UUID failed: {e}")
         
@@ -2796,10 +2801,7 @@ async def websocket_endpoint(websocket: WebSocket):
         audio_buffer = buffer_manager.get_buffer(call_uuid)
         
         # Stop existing audio and play welcome
-        subprocess.run(
-            ["fs_cli", "-x", f"uuid_break {call_uuid} all"],
-            capture_output=True
-        )
+        esl.uuid_break(call_uuid)
         await asyncio.sleep(0.5)
         response_handler.play_audio(call_uuid, "english_menu.wav")
         

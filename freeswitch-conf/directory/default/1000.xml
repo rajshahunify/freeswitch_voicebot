@@ -1,0 +1,21 @@
+<include>
+  <!--
+    SIP User: 1000 (for Zoiper testing)
+    Register Zoiper with:
+      Server: your-server-ip
+      Username: 1000
+      Password: 1234
+  -->
+  <user id="1000">
+    <params>
+      <param name="password" value="1234"/>
+    </params>
+    <variables>
+      <variable name="toll_allow" value="domestic,international,local"/>
+      <variable name="accountcode" value="1000"/>
+      <variable name="user_context" value="public"/>
+      <variable name="effective_caller_id_name" value="Test User"/>
+      <variable name="effective_caller_id_number" value="1000"/>
+    </variables>
+  </user>
+</include>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FreeSWITCH Dialplan: Public Context
+  Parks ALL incoming calls so agent.py can handle them via ESL.
+  
+  Flow: Incoming Call → Park → agent.py (CHANNEL_PARK) → Answer → Audio Fork → server.py
+-->
+<include>
+  <context name="public">
+
+    <!-- Park ALL incoming calls for the voicebot agent to handle -->
+    <extension name="voicebot-park-all">
+      <condition field="destination_number" expression=".*">
+        <action application="set" data="hangup_after_bridge=true"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+  </context>
+</include>

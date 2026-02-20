@@ -297,7 +297,7 @@ FREESWITCH_PORT = 8021
 FREESWITCH_PASSWORD = 'ClueCon'
 
 # WebSocket URL where FreeSWITCH sends audio
-WEBSOCKET_URL = "ws://127.0.0.1:8000/media"
+WEBSOCKET_URL = os.environ.get("WEBSOCKET_URL", "ws://127.0.0.1:8000/media")
 
 # =============================================================================
 # AUDIO CONFIGURATION
@@ -311,7 +311,7 @@ CHUNK_SIZE = int(SAMPLE_RATE * CHUNK_DURATION_MS / 1000)  # 512 samples
 # =============================================================================
 # STT (SPEECH-TO-TEXT) CONFIGURATION
 # =============================================================================
-STT_URL = "http://164.52.203.140:8890/transcribe"
+STT_URL = os.environ.get("STT_URL", "http://164.52.203.140:8890/transcribe")
 STT_PARAMS = {
     "sid": "live",
     "sample_rate": SAMPLE_RATE,
@@ -369,7 +369,7 @@ BUFFER_TIMEOUT_SECONDS = 10  # Force processing after this time
 # IVR (INTERACTIVE VOICE RESPONSE) CONFIGURATION
 # =============================================================================
 # Audio file paths
-AUDIO_BASE_PATH = "/usr/local/freeswitch/sounds/custom"
+AUDIO_BASE_PATH = os.environ.get("AUDIO_BASE_PATH", "/usr/local/freeswitch/sounds/custom")
 
 # Intent to audio file mapping
 INTENT_KEYWORDS = {
@@ -420,9 +420,10 @@ MAX_WORKERS = 4  # For CPU-intensive tasks (NC, VAD)
 CACHE_MODELS = True  # Keep models in memory between calls
 
 # Redis Configuration
-REDIS_HOST = '127.0.0.1'
-REDIS_PORT = 6379
-REDIS_DB = 0
+REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1')
+REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
+REDIS_DB = int(os.environ.get('REDIS_DB', '0'))
+REDIS_KEY_PREFIX = os.environ.get('REDIS_KEY_PREFIX', 'voicebot:')  # Prefix to avoid collision with other apps
 SESSION_TTL = 3600
 
 # Worker Configuration

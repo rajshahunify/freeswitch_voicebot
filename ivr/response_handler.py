@@ -1,6 +1,6 @@
 """
 Response Handler
-Manages audio playback responses via FreeSWITCH
+Manages audio playback responses via FreeSWITCH ESL
 """
 
 import logging
@@ -8,7 +8,10 @@ import subprocess
 import os
 import time
 import threading
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from esl_manager import ESLManager
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,7 @@ class ResponseHandler:
     def __init__(self,
                  audio_base_path: str,
                  allow_interruptions: bool = False,
+                 esl_manager=None,
                  speaking_timeout: int = 30):
         """
         Initialize response handler
@@ -34,11 +38,13 @@ class ResponseHandler:
         Args:
             audio_base_path: Base directory for audio files
             allow_interruptions: Allow user to interrupt playback
+            esl_manager: ESLManager instance (replaces fs_cli subprocess calls)
             speaking_timeout: Max time to hold speaking lock (seconds)
         """
         self.audio_base_path = audio_base_path
         self.allow_interruptions = allow_interruptions
         self.speaking_timeout = speaking_timeout
+        self.esl = esl_manager
         
         # Track playback state per call
         self.active_playbacks = {}  # {uuid: filename}
@@ -121,14 +127,19 @@ class ResponseHandler:
             self.bot_state[call_uuid]['speaking'] = True
             self.bot_state[call_uuid]['start_time'] = time.time()
             
-            # Start broadcast
+            # Start broadcast via ESL (persistent connection, ~2ms)
             broadcast_cmd = f"uuid_broadcast {call_uuid} {full_path} aleg"
-            process = subprocess.run(
-                ["fs_cli", "-x", broadcast_cmd],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            if self.esl:
+                result = self.esl.send(broadcast_cmd)
+            else:
+                # Fallback to fs_cli if no ESL manager provided
+                process = subprocess.run(
+                    ["fs_cli", "-x", broadcast_cmd],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                result = process.stdout
             
             # Get audio duration
             duration = self._get_audio_duration(full_path)
@@ -137,7 +148,7 @@ class ResponseHandler:
             self.active_playbacks[call_uuid] = filename
             
             # Check result
-            if "+OK" in process.stdout:
+            if "+OK" in (result or ""):
                 elapsed_ms = (time.time() - start_time) * 1000
                 logger.info(f"▶️  Playing {duration:.1f}s audio ({elapsed_ms:.0f}ms setup)")
                 
@@ -150,7 +161,7 @@ class ResponseHandler:
                 
                 return True
             else:
-                logger.warning(f"⚠️  FreeSWITCH error: {process.stdout.strip()}")
+                logger.warning(f"⚠️  FreeSWITCH error: {(result or '').strip()}")
                 self.bot_state[call_uuid]['speaking'] = False
                 return False
                 
@@ -171,11 +182,14 @@ class ResponseHandler:
             call_uuid: Call identifier
         """
         try:
-            subprocess.run(
-                ["fs_cli", "-x", f"uuid_break {call_uuid} all"],
-                capture_output=True,
-                timeout=2
-            )
+            if self.esl:
+                self.esl.uuid_break(call_uuid)
+            else:
+                subprocess.run(
+                    ["fs_cli", "-x", f"uuid_break {call_uuid} all"],
+                    capture_output=True,
+                    timeout=2
+                )
             logger.debug(f"Stopped audio for {call_uuid}")
         except Exception as e:
             logger.warning(f"Error stopping audio: {e}")

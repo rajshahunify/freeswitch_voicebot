@@ -28,7 +28,8 @@ class SessionManager:
                  redis_host: str = 'localhost',
                  redis_port: int = 6379,
                  redis_db: int = 0,
-                 session_ttl: int = 3600):
+                 session_ttl: int = 3600,
+                 key_prefix: str = 'voicebot:'):
         """
         Initialize session manager
         
@@ -37,6 +38,7 @@ class SessionManager:
             redis_port: Redis server port
             redis_db: Redis database number
             session_ttl: Session time-to-live in seconds (1 hour default)
+            key_prefix: Prefix for all Redis keys (avoids collision with other apps)
         """
         self.redis_client = redis.Redis(
             host=redis_host,
@@ -45,11 +47,12 @@ class SessionManager:
             decode_responses=True
         )
         self.session_ttl = session_ttl
+        self.prefix = key_prefix
         
         # Test connection
         try:
             self.redis_client.ping()
-            logger.info(f"✓ Connected to Redis at {redis_host}:{redis_port}")
+            logger.info(f"✓ Connected to Redis at {redis_host}:{redis_port} (prefix: {key_prefix})")
         except redis.ConnectionError as e:
             logger.error(f"❌ Failed to connect to Redis: {e}")
             raise
@@ -65,7 +68,7 @@ class SessionManager:
         Returns:
             True if session created, False if already exists
         """
-        session_key = f"session:{call_uuid}"
+        session_key = f"{self.prefix}session:{call_uuid}"
         
         # Check if session already exists
         if self.redis_client.exists(session_key):
@@ -89,7 +92,7 @@ class SessionManager:
         )
         
         # Add to active sessions set
-        self.redis_client.sadd('active_sessions', call_uuid)
+        self.redis_client.sadd(f'{self.prefix}active_sessions', call_uuid)
         
         logger.info(f"✓ Created session {call_uuid}")
         return True
@@ -104,7 +107,7 @@ class SessionManager:
         Returns:
             Session data dict or None if not found
         """
-        session_key = f"session:{call_uuid}"
+        session_key = f"{self.prefix}session:{call_uuid}"
         data = self.redis_client.get(session_key)
         
         if data:
@@ -131,7 +134,7 @@ class SessionManager:
         session['updated_at'] = datetime.utcnow().isoformat()
         
         # Save back to Redis
-        session_key = f"session:{call_uuid}"
+        session_key = f"{self.prefix}session:{call_uuid}"
         self.redis_client.setex(
             session_key,
             self.session_ttl,
@@ -150,13 +153,13 @@ class SessionManager:
         Returns:
             True if session ended, False if not found
         """
-        session_key = f"session:{call_uuid}"
+        session_key = f"{self.prefix}session:{call_uuid}"
         
         # Update status to ended
         self.update_session(call_uuid, {'status': 'ended'})
         
         # Remove from active sessions
-        self.redis_client.srem('active_sessions', call_uuid)
+        self.redis_client.srem(f'{self.prefix}active_sessions', call_uuid)
         
         # Keep session data for a bit (for stats/debugging)
         self.redis_client.expire(session_key, 300)  # 5 minutes
@@ -176,7 +179,7 @@ class SessionManager:
         Returns:
             True if lock acquired, False otherwise
         """
-        lock_key = f"lock:{call_uuid}"
+        lock_key = f"{self.prefix}lock:{call_uuid}"
         
         # Try to acquire lock
         acquired = self.redis_client.set(
@@ -203,7 +206,7 @@ class SessionManager:
         Returns:
             True if lock released, False if not held by this worker
         """
-        lock_key = f"lock:{call_uuid}"
+        lock_key = f"{self.prefix}lock:{call_uuid}"
         
         # Check if this worker holds the lock
         current_holder = self.redis_client.get(lock_key)
@@ -225,7 +228,7 @@ class SessionManager:
         Returns:
             List of active call UUIDs
         """
-        return list(self.redis_client.smembers('active_sessions'))
+        return list(self.redis_client.smembers(f'{self.prefix}active_sessions'))
     
     def get_session_count(self) -> int:
         """
@@ -234,7 +237,7 @@ class SessionManager:
         Returns:
             Number of active sessions
         """
-        return self.redis_client.scard('active_sessions')
+        return self.redis_client.scard(f'{self.prefix}active_sessions')
     
     def get_stats(self) -> Dict[str, Any]:
         """

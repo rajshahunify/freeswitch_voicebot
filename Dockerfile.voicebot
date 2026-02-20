@@ -1,0 +1,48 @@
+# Extend your FreeSWITCH image with Python + voicebot dependencies
+FROM rajunify123/freeswitch-mod-audio-fork:latest
+
+# Switch to root for installs
+USER root
+
+# Install Python 3, pip, and system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    ffmpeg \
+    libasound2-dev \
+    libsndfile1 \
+    build-essential \
+    supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy voicebot requirements and install Python deps
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# Ensure fs_cli is in PATH (standard location in FreeSWITCH images)
+ENV PATH="/usr/local/freeswitch/bin:${PATH}"
+
+# Create working directory for voicebot code
+RUN mkdir -p /opt/voicebot /opt/voicebot/logs /opt/voicebot/models /opt/voicebot/debug_audio
+
+WORKDIR /opt/voicebot
+
+# Copy supervisord config
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# FreeSWITCH ports
+EXPOSE 5060/udp 5060/tcp 5080/udp 5080/tcp 8021/tcp 5061/tcp 5061/udp
+# VoiceBot WebSocket port
+EXPOSE 8000/tcp
+# RTP ports
+EXPOSE 16384-16484/udp
+
+# Health check: verify both FreeSWITCH and VoiceBot are alive
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD test -f /usr/local/freeswitch/run/freeswitch.pid && \
+        kill -0 $(cat /usr/local/freeswitch/run/freeswitch.pid) && \
+        python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')" \
+        || exit 1
+
+CMD ["supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
