@@ -1,0 +1,147 @@
+{
+  "start": "en_flow_start",
+  "steps": {
+    "en_flow_start": {
+      "prompt": "Your preferred language is english. Say 'yes' or 'no' ",
+      "audio": "en_flow_start.wav",
+      "type": "choice",
+      "choices": {
+        "yes": "english_menu",
+        "no": "language_select"
+      }
+    },
+    "language_select": {
+      "prompt": "Language selection not implemented in english fallback.",
+      "next": null,
+      "end": true
+    },
+    "english_menu": {
+      "prompt": "We offer the following services. you can say 'Subscribe' ,'Billing', 'Payment', 'Internet', 'Site Visit', or 'General Inquiries.'",
+      "audio": "english_menu.wav",
+      "type": "choice",
+      "choices": {
+        "subscribe": "subscribe_fiber",
+        "billing": "billing_info",
+        "payment": "payment_options",
+        "internet": "internet_inquiries",
+        "site_visit": "site_visit_follow_up",
+        "general": "general_inquiries",
+        "agent": "connect_agent",
+        "repeat": "repeatmenu"
+      }
+    },
+    "payment_options": {
+      "prompt": "Would you like to make your payment using M-Pesa? Please say 'Yes' or 'No'.",
+      "audio": "payment_options.wav",
+      "type": "choice",
+      "choices": {
+        "yes": "mpesa",
+        "no": "airtel_money"
+      }
+    },
+    "airtel_money": {
+      "prompt": "Would you like to make your payment using Airtel Money? Please say 'Yes' or 'No'.",
+      "audio": "airtel_money.wav",
+      "type": "choice",
+      "choices": {
+        "yes": "airtel",
+        "no": "payment_billind_details"
+      }
+    },
+    "airtel": {
+      "prompt": "For Airtel Money, use our business name 'Unified Reach KE,' followed by your Unified Reach Fiber account number.",
+      "audio": "airtel.wav",
+      "next": "payment_billind_details"
+    },
+    "mpesa": {
+      "prompt": "To pay with M-Pesa, use Paybill number 5515216, followed by Unified Reach Fiber account number.",
+      "audio": "mpesa.wav",
+      "next": "payment_billind_details"
+    },
+    "payment_billind_details": {
+      "prompt": "Want to check your billing details? You can use the MyUnified Reach app, visit our website, or simply dial *111#.",
+      "audio": "payment_billind_details.wav",
+      "next": "thank_you"
+    },
+    "subscribe_fiber": {
+      "prompt": "Thanks for your interest in Unified Reach Fiber! Please hold while I connect you to a sales representative.",
+      "audio": "subscribe_fiber.wav",
+      "action": "transfer_agent"
+    },
+    "billing_info": {
+      "prompt": "For billing questions, please say your registered mobile number.",
+      "audio": "billing_info.wav",
+      "type": "input",
+      "action": "get_billing_info",
+      "next": "thank_you"
+    },
+    "repeatmenu": {
+      "prompt": "For more services, you can say: 'Subscribe to Fiber,' 'Billing Inquiries', 'Payment Inquiries,' 'Internet Inquiries,' 'Site Visit Follow-Up,' 'General Inquiries,' or 'Repeat Menu.'",
+      "audio": "repeatmenu.wav",
+      "type": "choice",
+      "choices": {
+        "yes": "repeatmenu",
+        "subscribe": "subscribe_fiber",
+        "billing": "billing_info",
+        "payment": "payment_options",
+        "internet": "internet_inquiries",
+        "site_visit": "site_visit_follow_up",
+        "general": "general_inquiries",
+        "agent": "connect_agent",
+        "repeat": "repeatmenu"
+      }
+    },
+    "internet_inquiries": {
+      "prompt": "Please hold while I connect you to the next available representative.",
+      "audio": "internet_inquiries.wav",
+      "action": "transfer_agent"
+    },
+    "general_inquiries": {
+      "prompt": "Thanks for choosing General Enquiries. You can ask about 'Shop Location,' 'Service Coverage,' or say 'Repeat Menu' to hear these options again.",
+      "audio": "general_inquiries.wav",
+      "type": "choice",
+      "choices": {
+        "location": "shop_location",
+        "coverage": "service_coverage",
+        "repeat": "repeatmenu",
+        "agent": "connect_agent"
+      }
+    },
+    "shop_location": {
+      "prompt": "We've sent you a text with our shop location on your registered mobile number. Thank you.",
+      "audio": "shop_location.wav",
+      "action": "send_sms",
+      "next": "thank_you"
+    },
+    "service_coverage": {
+      "prompt": "We've sent you a text with our service coverage details. Thank you.",
+      "audio": "service_coverage.wav",
+      "action": "send_sms",
+      "next": "thank_you"
+    },
+    "site_visit_follow_up": {
+      "prompt": "Please hold while I connect you to the next available representative.",
+      "audio": "site_visit_follow_up.wav",
+      "action": "transfer_agent"
+    },
+    "connect_agent": {
+      "prompt": "I'm connecting you to an agent now. Please hold for just a moment.",
+      "audio": "connect_agent.wav",
+      "action": "transfer_agent"
+    },
+    "thank_you": {
+      "prompt": "Thank you for choosing our services! Would you like any further assistance? Just say 'Yes' or 'No.'",
+      "audio": "thank_you.wav",
+      "type": "choice",
+      "choices": {
+        "yes": "repeatmenu",
+        "no": "thank_you_end"
+      }
+    },
+    "thank_you_end": {
+      "prompt": "Thank you for choosing our services. We truly appreciate you, and we hope you have a wonderful day!",
+      "audio": "thank_you_end.wav",
+      "end": true
+    }
+  }
+}
