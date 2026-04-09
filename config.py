@@ -105,6 +105,7 @@ USE_SEMANTIC_MATCHING = False
 # =============================================================================
 ALLOW_INTERRUPTIONS = False  # Allow user to interrupt bot speech
 BOT_SPEAKING_TIMEOUT = 30  # Max seconds to hold speaking lock
+CALL_END_DISCONNECT_DELAY = 2.5  # Seconds to wait after final audio before hanging up
 
 # =============================================================================
 # WEBSOCKET SERVER CONFIGURATION

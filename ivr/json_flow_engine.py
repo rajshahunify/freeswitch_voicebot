@@ -162,11 +162,6 @@ class FlowEngine:
         user_lower = user_text.lower().strip()
         choice_keys = list(choices.keys())
 
-        # ---- Pass 0: exact substring match (fastest, zero cost) -----------
-        for key in choice_keys:
-            if key.lower() in user_lower:
-                logger.info(f"Exact match '{user_lower}' -> '{key}'")
-                return choices[key]
 
         # ---- Pass 1a: synonym expansion for yes/no -------------------------
         for key in choice_keys:
