@@ -32,7 +32,6 @@ __all__ = [
     # VAD
     'PerCallVADManager',
     'get_vad_manager',
-    'detect_speech',
     'VADDetector',
     
     # Buffering

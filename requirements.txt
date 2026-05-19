@@ -19,6 +19,7 @@ requests
 # Intent matching
 fuzzywuzzy
 python-Levenshtein
+sentence-transformers
 
 # Utilities
 python-multipart
