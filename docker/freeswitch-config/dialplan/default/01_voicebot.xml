@@ -1,0 +1,20 @@
+<include>
+  <extension name="python_agent">
+    <condition field="destination_number" expression="^5000$">
+      <!-- Disable timeouts so the call stays up -->
+      <action application="set" data="media_timeout=0"/>
+      <action application="set" data="media_hold_timeout=0"/>
+      <action application="set" data="session_timeout=0"/>
+
+      <!-- Answer the call -->
+      <action application="answer"/>
+      <action application="sleep" data="500"/>
+
+      <!-- Fork audio to the Python WebSocket server running in the same container -->
+      <action application="set" data="execute_on_answer=uuid_audio_fork ${uuid} start ws://127.0.0.1:8000/media mono 16k"/>
+
+      <!-- Park the call (keeps it alive while audio is streamed) -->
+      <action application="park"/>
+    </condition>
+  </extension>
+</include>

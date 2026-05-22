@@ -9,6 +9,7 @@ greenswitch
 # Audio processing
 numpy<2.0.0
 torch
+torchaudio
 
 # DeepFilterNet2
 deepfilternet

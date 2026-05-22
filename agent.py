@@ -86,35 +86,49 @@ def main():
     logger.info(f"WebSocket: {config.WEBSOCKET_URL}")
     logger.info("=" * 60)
     
-    try:
-        # Connect to FreeSWITCH
-        logger.info("🔌 Connecting to FreeSWITCH ESL...")
-        fs.connect()
-        logger.info("✓ Connected to FreeSWITCH")
+    import time
+    
+    while True:
+        try:
+            # Connect to FreeSWITCH
+            logger.info("🔌 Connecting to FreeSWITCH ESL...")
+            fs.connect()
+            logger.info("✓ Connected to FreeSWITCH")
+            
+            # Subscribe to CHANNEL_PARK events
+            # CHANNEL_PARK is triggered when a call is parked/answered
+            logger.info("📡 Subscribing to call events...")
+            fs.send("events plain CHANNEL_PARK")
+            
+            # Register event handler
+            fs.register_handle("CHANNEL_PARK", on_call)
+            logger.info("✓ Event handler registered")
+            
+            logger.info("=" * 60)
+            logger.info("✅ READY - Waiting for incoming calls...")
+            logger.info("=" * 60)
+            
+            # Start event processing loop
+            # This blocks and processes events continuously
+            fs.process_events()
+            
+            logger.warning("⚠️  ESL connection closed. Reconnecting in 3 seconds...")
+            
+        except KeyboardInterrupt:
+            logger.info("\n🛑 Shutting down (Ctrl+C pressed)")
+            break
+        except Exception as e:
+            logger.error(f"❌ ESL Connection error: {e}. Retrying in 3 seconds...", exc_info=True)
+            
+        # Clean up connection state before retrying
+        try:
+            fs.disconnect()
+        except:
+            pass
+            
+        time.sleep(3)
         
-        # Subscribe to CHANNEL_PARK events
-        # CHANNEL_PARK is triggered when a call is parked/answered
-        logger.info("📡 Subscribing to call events...")
-        fs.send("events plain CHANNEL_PARK")
-        
-        # Register event handler
-        fs.register_handle("CHANNEL_PARK", on_call)
-        logger.info("✓ Event handler registered")
-        
-        logger.info("=" * 60)
-        logger.info("✅ READY - Waiting for incoming calls...")
-        logger.info("=" * 60)
-        
-        # Start event processing loop
-        # This blocks and processes events continuously
-        fs.process_events()
-        
-    except KeyboardInterrupt:
-        logger.info("\n🛑 Shutting down (Ctrl+C pressed)")
-    except Exception as e:
-        logger.error(f"❌ Fatal error: {e}", exc_info=True)
-    finally:
-        logger.info("👋 ESL Agent stopped")
+    logger.info("👋 ESL Agent stopped")
 
 
 if __name__ == "__main__":

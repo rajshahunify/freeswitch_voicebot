@@ -1,0 +1,69 @@
+services:
+  voicebot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: freeswitch-voicebot
+    # -----------------------------------------------------------------------
+    # BRIDGE NETWORKING (Windows, macOS, and Linux support)
+    # All configs are baked into the image and dynamically patched by
+    # entrypoint.sh at startup. Change settings here — no code edits needed.
+    # -----------------------------------------------------------------------
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "5080:5080/udp"
+      - "5080:5080/tcp"
+      - "8000:8000/tcp"
+      - "8021:8021/tcp"
+      - "16384-16394:16384-16394/udp"
+    environment:
+      # ── FreeSWITCH / SIP Settings ─────────────────────────────────────
+      # NAT/SIP Traversal IP: The IP that FreeSWITCH advertises in SDP.
+      #   - Set to 127.0.0.1 when testing from localhost (Windows/macOS)
+      #   - Set to your server's public IP for remote / production access
+      - EXTERNAL_IP=127.0.0.1
+      # The extension number callers dial to reach the voicebot
+      - VOICEBOT_EXTENSION=7000
+      # Inside the container, all services talk over localhost
+      - FREESWITCH_HOST=127.0.0.1
+      - FREESWITCH_PORT=8021
+      - FREESWITCH_PASSWORD=ClueCon
+      # WebSocket URL used by mod_audio_fork to stream caller audio
+      - WEBSOCKET_URL=ws://127.0.0.1:8000/media
+
+      # ── Speech-to-Text (STT) ──────────────────────────────────────────
+      - STT_URL=http://164.52.203.140:8890/transcribe
+
+      # ── Voice Activity Detection (VAD) ─────────────────────────────────
+      # Lower threshold = more sensitive to quiet speech
+      # - VAD_THRESHOLD=0.3
+      # Milliseconds of silence before speech is considered ended
+      # - VAD_MIN_SILENCE_DURATION_MS=1500
+
+      # ── Noise Cancellation (DeepFilterNet2) ────────────────────────────
+      # Set to "true" to enable neural noise cancellation (CPU intensive)
+      - NC_ENABLED=false
+      # Set to "true" to use GPU acceleration (requires NVIDIA runtime)
+      - DF_USE_GPU=false
+
+      # ── Server Settings ────────────────────────────────────────────────
+      - WS_PORT=8000
+      - LOG_LEVEL=INFO
+      - MAX_CONCURRENT_CALLS=5
+
+      # ── Redis ──────────────────────────────────────────────────────────
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6379
+      - REDIS_REQUIRED=false
+    volumes:
+      # Persist logs and debug audio to the host for inspection
+      - ./logs:/app/logs
+      - ./debug_audio:/app/debug_audio
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-sf", "http://127.0.0.1:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

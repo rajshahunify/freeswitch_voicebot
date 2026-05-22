@@ -13,7 +13,12 @@ FREESWITCH_PORT = int(os.getenv("FREESWITCH_PORT", 8021))
 FREESWITCH_PASSWORD = os.getenv("FREESWITCH_PASSWORD", 'ClueCon')
 
 # WebSocket URL where FreeSWITCH sends audio
-WEBSOCKET_URL = os.getenv("WEBSOCKET_URL", "ws://127.0.0.1:8000/media")
+# FreeSWITCH runs INSIDE Docker, so it cannot use 127.0.0.1 to reach the host.
+# Choose the correct option for your network setup:
+#   Option A (Linux, bridge network): ws://172.17.0.1:8000/media
+#   Option B (Docker Desktop Mac/Win): ws://host.docker.internal:8000/media
+#   Option C (--network host mode):   ws://127.0.0.1:8000/media
+WEBSOCKET_URL = os.getenv("WEBSOCKET_URL", "ws://172.17.0.1:8000/media")  # Linux bridge (default)
 
 # =============================================================================
 # AUDIO CONFIGURATION
@@ -46,6 +51,10 @@ DF_MODEL = 'DeepFilterNet2'
 DF_FRAME_SIZE = CHUNK_SIZE  # Process in 32ms chunks
 DF_COMPENSATE_DELAY = True  # Compensate for processing delay
 DF_ATTENUATION_LIMIT = 6.0  # dB - REDUCED from 100 to preserve voice quality
+
+# Set to False to skip DeepFilterNet entirely (no git, no torchaudio needed for NC)
+# Audio goes straight to STT — good for CPU-only deployments
+NC_ENABLED = os.getenv("NC_ENABLED", "true").lower() == "true"
 
 # Performance
 DF_USE_GPU = os.getenv("DF_USE_GPU", "False").lower() == "true"
@@ -88,7 +97,7 @@ BUFFER_TIMEOUT_SECONDS = 10  # Force processing after this time
 AUDIO_BASE_PATH = "/usr/local/freeswitch/sounds/custom"
 
 # JSON Flow engine configuration
-IVR_FLOW_DIR = "ivr/json_files"
+IVR_FLOW_DIR = "ivr/flows"
 IVR_DEFAULT_LANG = "en"
 IVR_MAX_RETRIES = 3
 
@@ -135,6 +144,8 @@ REDIS_HOST = os.getenv("REDIS_HOST", '127.0.0.1')
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 SESSION_TTL = 3600
+# Set to False to allow server to start without Redis (useful for single-call testing)
+REDIS_REQUIRED = os.getenv("REDIS_REQUIRED", "False").lower() == "true"
 
 # Worker Configuration
 WORKER_ID = f"worker-{os.getpid()}"

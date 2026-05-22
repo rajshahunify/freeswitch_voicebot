@@ -1,0 +1,84 @@
+# =============================================================================
+# docker-compose.dev.yml — Local Development Configuration
+# =============================================================================
+# Use this for active development on the voicebot code. It volume-mounts
+# your local source code AND FreeSWITCH config files into the container
+# so you can edit Python code, IVR flows, sounds, and FreeSWITCH configs
+# WITHOUT rebuilding the Docker image.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml logs -f
+#
+# After editing Python code:
+#   docker exec freeswitch-voicebot supervisorctl restart voicebot-server voicebot-agent
+#
+# After editing FreeSWITCH XML configs:
+#   docker exec freeswitch-voicebot fs_cli -x "reloadxml"
+# =============================================================================
+
+services:
+  voicebot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: freeswitch-voicebot
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "5080:5080/udp"
+      - "5080:5080/tcp"
+      - "8000:8000/tcp"
+      - "8021:8021/tcp"
+      - "16384-16394:16384-16394/udp"
+    environment:
+      # ── FreeSWITCH / SIP Settings ─────────────────────────────────────
+      - EXTERNAL_IP=127.0.0.1
+      - VOICEBOT_EXTENSION=5000
+      - FREESWITCH_HOST=127.0.0.1
+      - FREESWITCH_PORT=8021
+      - FREESWITCH_PASSWORD=ClueCon
+      - WEBSOCKET_URL=ws://127.0.0.1:8000/media
+
+      # ── Speech-to-Text (STT) ──────────────────────────────────────────
+      - STT_URL=http://164.52.203.140:8890/transcribe
+
+      # ── Noise Cancellation ─────────────────────────────────────────────
+      - NC_ENABLED=false
+      - DF_USE_GPU=false
+
+      # ── Server Settings ────────────────────────────────────────────────
+      - WS_PORT=8000
+      - LOG_LEVEL=INFO
+      - MAX_CONCURRENT_CALLS=5
+
+      # ── Redis ──────────────────────────────────────────────────────────
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6379
+      - REDIS_REQUIRED=false
+    volumes:
+      # ── Live-mount application code (edit on host, auto-reflected) ─────
+      - .:/app
+
+      # ── Persist runtime data ──────────────────────────────────────────
+      - ./logs:/app/logs
+      - ./debug_audio:/app/debug_audio
+
+      # ── Live-mount sound files (add/replace WAVs without rebuild) ─────
+      - ./sounds:/usr/local/freeswitch/sounds/custom
+
+      # ── Live-mount FreeSWITCH configs (edit XML on host, reloadxml) ───
+      - ./docker/freeswitch-config/autoload_configs/event_socket.conf.xml:/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml
+      - ./docker/freeswitch-config/autoload_configs/switch.conf.xml:/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml
+      - ./docker/freeswitch-config/vars.xml:/usr/local/freeswitch/conf/vars.xml
+      - ./docker/freeswitch-config/dialplan/default.xml:/usr/local/freeswitch/conf/dialplan/default.xml
+      - ./docker/freeswitch-config/dialplan/default/01_voicebot.xml:/usr/local/freeswitch/conf/dialplan/default/01_voicebot.xml
+      - ./docker/freeswitch-config/dialplan/public/01_voicebot_route.xml:/usr/local/freeswitch/conf/dialplan/public/01_voicebot_route.xml
+      - ./docker/freeswitch-config/sip_profiles/internal.xml:/usr/local/freeswitch/conf/sip_profiles/internal.xml
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

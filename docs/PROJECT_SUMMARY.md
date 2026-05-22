@@ -18,88 +18,84 @@ A complete, production-ready voicebot system with:
 ```
 freeswitch_voicebot/
 ├── 📄 config.py                  # All configuration in one place
-├── 🚀 server.py                  # Main WebSocket server (start this first)
-├── 🤖 agent.py                   # FreeSWITCH ESL handler (start second)
-├── 📡 stt_handler.py             # Speech-to-text processing
+├── 🚀 server_multicall.py        # Multi-call WebSocket server (FastAPI)
+├── 🤖 agent.py                   # FreeSWITCH ESL agent
+├── 📡 stt_handler.py             # Speech-to-text processing (Whisper)
+├── 💾 session_manager.py         # Redis session and concurrency manager
 │
 ├── 🎵 audio_pipeline/            # Audio processing modules
 │   ├── __init__.py
-│   ├── noise_canceller.py        # DeepFilterNet2 wrapper
+│   ├── improved_noise_canceller.py  # DeepFilterNet2 wrapper
 │   ├── vad_detector.py           # Silero VAD wrapper
-│   └── audio_buffer.py           # Buffer management
+│   └── audio_buffer.py           # Per-call buffer management
 │
 ├── 📞 ivr/                       # IVR logic
 │   ├── __init__.py
-│   ├── intent_matcher.py         # Keyword matching
-│   └── response_handler.py       # Audio playback
+│   ├── json_flow_engine.py       # JSON navigation with fuzzy + semantic matching
+│   └── response_handler.py       # Audio playback via uuid_broadcast
 │
 ├── 📋 requirements.txt           # Python dependencies
-├── 🛠️ install.sh                 # Installation script
-├── 🧪 test_components.py         # Component testing
-│
-├── 📚 Documentation
-│   ├── README.md                 # Full documentation
-│   ├── QUICKSTART.md            # 5-minute setup guide
-│   └── ARCHITECTURE.md          # Technical deep-dive
+├── 🐳 Dockerfile                 # All-in-one supervisord Docker image
+├── 🐳 docker-compose.yml         # Compose for dev/bridge network
+├── 🐳 docker-compose.host.yml    # Compose for production host network
 │
 └── 📁 Runtime directories
     ├── logs/                     # Log files
-    └── models/                   # Downloaded AI models
+    ├── debug_audio/              # captured NC audio WAVs (before/after)
+    └── models/                   # Cached Silero VAD models
 ```
 
 ## 🎯 Key Features
 
-### 1. Noise Cancellation (NEW!)
-- **Model**: DeepFilterNet2 (state-of-the-art)
-- **Purpose**: Removes background noise before processing
-- **Performance**: ~35ms latency per chunk
-- **Quality**: Significant improvement in noisy environments
+### 1. Voice Activity Detection (Silero VAD)
+- **Model**: Silero VAD (highly accurate, lightweight recurrent model)
+- **Purpose**: Detects when user is speaking chunk-by-chunk in real-time
+- **Performance**: <1ms latency per chunk
+- **Benefit**: Processes raw incoming streams and manages speech boundaries dynamically.
 
-### 2. Voice Activity Detection (NEW!)
-- **Model**: Silero VAD (highly accurate)
-- **Purpose**: Detects when user is speaking
-- **Performance**: <1ms latency
-- **Benefit**: Only processes actual speech (saves compute)
-
-### 3. Intelligent Buffering (NEW!)
-- **Purpose**: Accumulates audio during speech
-- **Trigger**: Sends to STT when speech ends
+### 2. Intelligent Buffering
+- **Purpose**: Accumulates audio chunks during speech
+- **Trigger**: Sends to NC + STT when speech ends (speech_end detected)
 - **Safety**: Prevents buffer overflow & timeouts
 
-### 4. Complete Pipeline
+### 3. Noise Cancellation (DeepFilterNet2)
+- **Model**: DeepFilterNet2 (state-of-the-art neural network)
+- **Purpose**: Denoises the full utterance *after* VAD captures it, preserving voice quality
+- **Performance**: High-speed processing in background thread
+- **Benefit**: Zero robotic bubbling since it operates on the full context window of the utterance rather than tiny isolated frames.
+
+### 4. Complete Pipeline (Multi-Call Optimized)
 ```
-Audio → NC → VAD → Buffer → STT → Intent → Response
-   ↓      ↓     ↓      ↓      ↓       ↓        ↓
- 16kHz  Clean Speech  Text  Match   Play
-       Audio Detect   Only  Intent  Audio
+Raw Chunks (32ms) ──▶ Silero VAD ──▶ Audio Buffer (accumulate) ──▶ DeepFilterNet2 (NC on Utterance) ──▶ Whisper STT ──▶ Intent Matching ──▶ Response
 ```
 
-## 🚀 Quick Start (3 Steps)
+## 🚀 Quick Start (Dockerized)
 
-### 1. Install
+The entire voicebot stack runs inside an all-in-one container managed by supervisord.
+
+### 1. Build and Run
 ```bash
-cd freeswitch_voicebot
-./install.sh
+# Build the dev stack
+docker compose build
+
+# Start the stack (bridge mode)
+docker compose up -d
 ```
 
-### 2. Configure
-Edit `config.py`:
-```python
-FREESWITCH_PASSWORD = 'ClueCon'  # Your password
-STT_URL = "http://your-stt-api"  # Your STT endpoint
-AUDIO_BASE_PATH = "/path/to/audio"  # Your audio files
-```
-
-### 3. Run
+### 2. Verify Health
 ```bash
-# Terminal 1
-python3 server.py
-
-# Terminal 2  
-python3 agent.py
+docker exec -it freeswitch-voicebot supervisorctl status
+```
+*Expected output showing all four services active:*
+```text
+freeswitch                       RUNNING   pid 12, uptime 0:01:00
+redis                            RUNNING   pid 10, uptime 0:01:00
+voicebot-agent                   RUNNING   pid 15, uptime 0:00:48
+voicebot-server                  RUNNING   pid 14, uptime 0:00:52
 ```
 
-**That's it!** Call your FreeSWITCH number and test it out.
+### 3. Call and Test
+Register a SIP softphone (e.g. Zoiper) to `127.0.0.1:5060` (ext `1000`, pwd `1234`) and dial `5000`!
 
 ## 🎛️ Configuration Highlights
 
@@ -157,7 +153,7 @@ agent.py (commented mess)
 **New**: Clean separation
 ```
 config.py          # Settings
-server.py          # WebSocket handling
+server_multicall.py # WebSocket handling
 agent.py           # FreeSWITCH integration
 audio_pipeline/    # Audio processing
 ivr/               # Business logic
@@ -272,7 +268,7 @@ VAD_THRESHOLD = 0.6            # Higher threshold
 
 - **QUICKSTART.md**: 5-minute setup guide
 - **README.md**: Complete documentation  
-- **ARCHITECTURE.md**: Technical deep-dive
+- **walkthrough_combined_freeswitch_image_and_bot**: In-depth debugging history
 - **config.py**: Inline comments for all settings
 
 ## 🎓 Learning the Code
@@ -280,9 +276,9 @@ VAD_THRESHOLD = 0.6            # Higher threshold
 ### Start Here
 
 1. `config.py` - Understand all settings
-2. `server.py` - See the main flow
-3. `audio_pipeline/vad_detector.py` - See how VAD works
-4. `audio_pipeline/noise_canceller.py` - See how NC works
+2. `server_multicall.py` - See the main WebSocket server flow
+3. `audio_pipeline/vad_detector.py` - See how per-call VAD works
+4. `audio_pipeline/improved_noise_canceller.py` - See how NC works
 
 ### Key Concepts
 

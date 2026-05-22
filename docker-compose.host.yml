@@ -1,0 +1,59 @@
+# =============================================================================
+# docker-compose.host.yml — Linux Production (Host Networking)
+# =============================================================================
+# For high-concurrency production deployments on Linux servers.
+# Uses native host networking — no Docker NAT overhead, full RTP port range.
+#
+# Usage:
+#   docker compose -f docker-compose.host.yml up -d
+#
+# IMPORTANT: Host networking only works natively on Linux. On Windows/macOS
+# Docker Desktop, use docker-compose.yml (bridge mode) instead.
+# =============================================================================
+
+services:
+  voicebot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: freeswitch-voicebot
+    network_mode: host
+    environment:
+      # ── FreeSWITCH / SIP Settings ─────────────────────────────────────
+      # Set EXTERNAL_IP to your server's public IP or LAN IP in production
+      - EXTERNAL_IP=127.0.0.1
+      - VOICEBOT_EXTENSION=5000
+      - FREESWITCH_HOST=127.0.0.1
+      - FREESWITCH_PORT=8021
+      - FREESWITCH_PASSWORD=ClueCon
+      - WEBSOCKET_URL=ws://127.0.0.1:8000/media
+
+      # ── Speech-to-Text (STT) ──────────────────────────────────────────
+      - STT_URL=http://164.52.203.140:8890/transcribe
+
+      # ── Noise Cancellation ─────────────────────────────────────────────
+      - NC_ENABLED=false
+      - DF_USE_GPU=false
+
+      # ── Server Settings ────────────────────────────────────────────────
+      - WS_PORT=8000
+      - LOG_LEVEL=INFO
+      - MAX_CONCURRENT_CALLS=5
+
+      # ── Redis ──────────────────────────────────────────────────────────
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6379
+      - REDIS_REQUIRED=false
+    volumes:
+      # Persist logs and debug audio
+      - ./logs:/app/logs
+      - ./debug_audio:/app/debug_audio
+      # Live-update sounds without rebuilding
+      - ./sounds:/usr/local/freeswitch/sounds/custom
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

@@ -1,0 +1,8 @@
+<include>
+  <!-- Route extension 5000 from the public context to the default context -->
+  <extension name="voicebot_public_route">
+    <condition field="destination_number" expression="^5000$">
+      <action application="transfer" data="5000 XML default"/>
+    </condition>
+  </extension>
+</include>

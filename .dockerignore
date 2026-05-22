@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and debug (mounted as volumes, not baked in)
+logs/
+debug_audio/
+*.log
+
+# Wav samples not needed in image (test files)
+nc_*.wav
+
+# Documentation (not needed at runtime)
+README.md
+QUICKSTART.md
+PROJECT_SUMMARY.md
+walkthrough.md
+*.html
+
+# Setup/backup files
+setup/
+*.tar.gz
+*.service
+
+# Test files
+test_*.py
+
+# Models directory (downloaded at runtime)
+models/
+
+# Unused server files
+server.py
+simple_server.py

@@ -104,6 +104,7 @@ class VADDetector:
         self.silence_frames = 0
         self.speech_buffer = []
         self.triggered = False
+        self.audio_remainder = b""
         
         # For Silero internal state
         if hasattr(self, 'model') and self.model is not None:
@@ -168,41 +169,69 @@ class VADDetector:
                 - probability: float - Speech probability
                 - should_process: bool - Accumulated enough speech to process
         """
-        is_speech, probability = self.process_chunk(audio_chunk)
+        if self.model is None:
+            self.load_model()
+            
+        if not hasattr(self, 'audio_remainder'):
+            self.audio_remainder = b""
+            
+        # Accumulate input audio to avoid zero-padding or chunk truncation issues
+        full_chunk = self.audio_remainder + audio_chunk
+        bytes_per_window = self.window_size * 2
+        num_windows = len(full_chunk) // bytes_per_window
+        self.audio_remainder = full_chunk[num_windows * bytes_per_window:]
         
         speech_start = False
         speech_end = False
         should_process = False
+        probability = 0.0
         
-        if is_speech:
-            # Speech detected
-            self.silence_frames = 0
-            self.speech_frames += 1
+        if num_windows == 0:
+            return {
+                'is_speech': self.is_speaking,
+                'speech_start': False,
+                'speech_end': False,
+                'probability': 0.0,
+                'should_process': False
+            }
             
-            if not self.is_speaking:
-                # Speech just started
-                if self.speech_frames >= self.min_speech_frames:
-                    self.is_speaking = True
-                    speech_start = True
-                    self.triggered = True
-                    logger.debug(f"🎤 Speech START (prob: {probability:.2f})")
-        else:
-            # Silence detected
-            self.speech_frames = 0
+        # Process each window sequentially to maintain smooth VAD states
+        for i in range(num_windows):
+            window_bytes = full_chunk[i * bytes_per_window : (i + 1) * bytes_per_window]
+            window_np = np.frombuffer(window_bytes, dtype=np.int16)
+            audio_float = window_np.astype(np.float32) / 32768.0
+            audio_tensor = torch.from_numpy(audio_float)
             
-            if self.is_speaking:
-                self.silence_frames += 1
+            with torch.no_grad():
+                window_prob = self.model(audio_tensor, self.sample_rate).item()
+            
+            probability = max(probability, window_prob)
+            window_is_speech = window_prob >= self.threshold
+            
+            if window_is_speech:
+                self.silence_frames = 0
+                self.speech_frames += 1
                 
-                # Check if speech ended
-                if self.silence_frames >= self.min_silence_frames:
-                    self.is_speaking = False
-                    speech_end = True
-                    should_process = self.triggered
-                    self.triggered = False
-                    logger.debug(f"🎤 Speech END (silence: {self.silence_frames} frames)")
-        
+                if not self.is_speaking:
+                    if self.speech_frames >= self.min_speech_frames:
+                        self.is_speaking = True
+                        speech_start = True
+                        self.triggered = True
+                        logger.info(f"🎤 Speech START (prob: {window_prob:.2f})")
+            else:
+                self.speech_frames = 0
+                
+                if self.is_speaking:
+                    self.silence_frames += 1
+                    if self.silence_frames >= self.min_silence_frames:
+                        self.is_speaking = False
+                        speech_end = True
+                        should_process = self.triggered
+                        self.triggered = False
+                        logger.info(f"🎤 Speech END (silence: {self.silence_frames} frames)")
+                        
         return {
-            'is_speech': is_speech,
+            'is_speech': self.is_speaking,
             'speech_start': speech_start,
             'speech_end': speech_end,
             'probability': probability,

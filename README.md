@@ -17,10 +17,11 @@ The system supports **multiple concurrent calls**, with per-call audio buffering
 - [Audio Processing Pipeline](#audio-processing-pipeline)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Running the System](#running-the-system)
+- [Installation & Running](#installation--running)
+- [Making a Test Call (Zoiper Setup)](#-making-a-test-call-zoiper-setup)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
+- [API Endpoints](#api-endpoints)
 
 ---
 
@@ -357,44 +358,81 @@ Raw 32ms chunk (1024 bytes @ 16kHz/16-bit/mono)
 └─────────────────────────────────────────┘
 ```
 
+> [!NOTE]
+> ### 🧠 Deep-Dive: Why VAD Runs BEFORE Noise Cancellation (NC)
+> 
+> In a high-concurrency production telephony pipeline, running **Voice Activity Detection (VAD) before Noise Cancellation (NC)** is a deliberate, highly optimized design choice. While it might seem intuitive to clean up the audio *before* detecting speech, that approach creates severe scalability bottlenecks and audio degradation in practice:
+> 
+> 1. **Ultra-Low Latency Streaming vs. Computational Complexity**
+>    * **Silero VAD** is a lightweight, highly optimized recurrent neural network. It processes individual 32ms incoming frames in **less than 1ms**, contributing virtually zero latency to the streaming audio loop.
+>    * **DeepFilterNet2** is a deep convolutional/recurrent neural network. Running NC on every 32ms frame continuously for multiple calls would completely saturate the host's CPU and degrade under high concurrency. By putting VAD first, we filter out silent periods and **only invoke the heavy NC model on active speech segments**.
+> 
+> 2. **Denoising Quality and Context Windows**
+>    * Deep neural noise suppression models rely heavily on **temporal context** (historical spectral data over hundreds of milliseconds) to model background noise profiles accurately.
+>    * Denoising tiny, isolated 32ms slices in real-time results in metallic voice distortion, high-frequency "speech bubbling" artifacts, and harsh clipping. 
+>    * By buffering the raw speech frames and applying NC to the **entire combined utterance block**, DeepFilterNet2 has full access to the temporal structure of the speech, producing incredibly natural, crystal-clear denoised audio.
+> 
+> 3. **CPU Preservation & Multi-Call Capacity**
+>    * Because users spend up to 70% of a call either listening to the bot or sitting in silence, running NC continuously is extremely wasteful. 
+>    * Placing VAD at the front gate acts as a highly efficient guard, allowing the system to run on modest hardware and scale to many concurrent channels.
+
 ---
 
 ## Project Structure
 
 ```
 freeswitch_voicebot/
-├── server_multicall.py          # Main WebSocket server (FastAPI)
-├── agent.py                     # FreeSWITCH ESL agent
-├── config.py                    # Centralized configuration
-├── stt_handler.py               # Speech-to-text HTTP client
-├── session_manager.py           # Redis-backed session management
-├── requirements.txt             # Python dependencies
+├── README.md                        # This file
+├── QUICKSTART.md                    # 5-minute Docker setup guide
+├── CHANGELOG.md                     # Version history
 │
-├── audio_pipeline/              # Audio processing modules
-│   ├── __init__.py
+├── Dockerfile                       # All-in-one Docker image
+├── entrypoint.sh                    # Dynamic config injection at startup
+├── docker-compose.yml               # Bridge networking (production)
+├── docker-compose.dev.yml           # Local dev (volume mounts for live editing)
+├── docker-compose.host.yml          # Linux host networking (high performance)
+│
+├── config.py                        # Centralized configuration
+├── server_multicall.py              # Main WebSocket server (FastAPI)
+├── agent.py                         # FreeSWITCH ESL agent
+├── stt_handler.py                   # Speech-to-text HTTP client
+├── session_manager.py               # Redis-backed session management
+├── requirements.txt                 # Python dependencies
+│
+├── audio_pipeline/                  # Audio processing modules
 │   ├── improved_noise_canceller.py  # DeepFilterNet2 wrapper
 │   ├── vad_detector.py              # Silero VAD + PerCallVADManager
 │   └── audio_buffer.py             # Per-call audio buffering
 │
-├── ivr/                         # IVR logic
-│   ├── __init__.py
+├── ivr/                             # IVR logic
 │   ├── json_flow_engine.py          # JSON-based flow navigation
-│   ├── intent_matcher.py           # Legacy keyword matcher (kept for reference)
-│   ├── response_handler.py         # Audio playback via fs_cli
-│   └── json_files/                 # Flow definitions
-│       └── en.json                 # English IVR flow
+│   ├── response_handler.py          # Audio playback via fs_cli
+│   └── flows/                       # Flow definitions
+│       └── en.json                  # English IVR flow
 │
-├── sounds/                      # Pre-recorded audio files
-│   ├── english_menu.wav
-│   ├── payment_options.wav
-│   ├── sorry.wav
-│   ├── thank_you.wav
-│   └── ... (20 files)
+├── sounds/                          # Pre-recorded audio files (.wav)
 │
-├── docker-compose.yml           # Docker orchestration
-├── logs/                        # Log output directory
-├── debug_audio/                 # NC debug audio (before/after)
-└── models/                      # Model cache directory
+├── docker/                          # Docker and FreeSWITCH configs
+│   ├── supervisord.conf             # Process manager configuration
+│   └── freeswitch-config/
+│       ├── vars.xml
+│       ├── sip_profiles/internal.xml
+│       ├── dialplan/
+│       └── autoload_configs/
+│
+├── docs/                            # Documentation
+│   ├── WALKTHROUGH.md               # Detailed debugging history
+│   ├── UPGRADE_PLAN.md              # Future upgrade roadmap
+│   ├── PROJECT_SUMMARY.md           # Architecture summary
+│   └── archive/                     # Legacy bare-metal files
+│
+├── scripts/                         # Developer utilities
+│   ├── test_components.py           # Component testing
+│   └── test_redis.py                # Redis testing
+│
+├── logs/                            # Log output (gitignored)
+├── debug_audio/                     # NC debug audio (gitignored)
+└── models/                          # Model cache (gitignored)
 ```
 
 ---
@@ -403,118 +441,111 @@ freeswitch_voicebot/
 
 | Requirement | Purpose |
 |---|---|
-| **Docker** | Run the FreeSWITCH container |
-| **WSL2 / Linux** | Python server (DeepFilterNet requires Linux, `fs_cli` is a Linux binary) |
-| **Python 3.9+** | Server runtime |
-| **Redis** | Session state management |
+| **Docker** | Run the all-in-one FreeSWITCH + VoiceBot container |
 | **Network access** | STT API at `164.52.203.140:8890` must be reachable |
+| **SIP Softphone** | Any SIP client: Zoiper, Linphone, MicroSIP, Grandstream Wave, hardware phones |
+
+> [!NOTE]
+> Everything (FreeSWITCH, Redis, Python, dependencies) runs inside Docker. No local Python installation or WSL2 is required for running the voicebot.
 
 ---
 
-## Installation
+## Installation & Running
 
-### 1. Pull the FreeSWITCH Docker Image
+The entire VoiceBot system (FreeSWITCH, Redis, WebSocket Server, and ESL Agent) runs in a **single multi-service Docker container** managed by `supervisord`. All settings are configurable via environment variables in the compose file — no code changes needed.
 
-```bash
-docker pull rajunify123/freeswitch-mod-audio-fork
-```
+We provide **three compose configurations**:
 
-### 2. Copy Audio Files into the Container
+| File | Use Case | Networking |
+|---|---|---|
+| `docker-compose.yml` | Production / default | Bridge (works everywhere) |
+| `docker-compose.dev.yml` | Local development | Bridge + volume mounts |
+| `docker-compose.host.yml` | Linux high-performance | Host networking |
 
-The `sounds/` directory in this repo contains the pre-recorded IVR audio files. These need to be available inside the FreeSWITCH container at `/usr/local/freeswitch/sounds/custom/`:
+### Option A: Production / Default Setup
 
-```bash
-# Start the container first (see step 4), then copy sounds in:
-docker cp sounds/. voicebot-fs:/usr/local/freeswitch/sounds/custom/
-```
+All configs are baked into the image. The `entrypoint.sh` script dynamically patches FreeSWITCH XML configs using environment variables at startup.
 
-Or mount as a volume in docker-compose:
-```yaml
-volumes:
-  - ./sounds:/usr/local/freeswitch/sounds/custom
-```
+1. **Build and start the container:**
+   ```bash
+   docker compose build
+   docker compose up -d
+   ```
 
-### 3. Start Redis
+2. **Verify the container processes are running:**
+   ```bash
+   docker exec -it freeswitch-voicebot supervisorctl status
+   ```
+   *Expected output showing all four services active:*
+   ```text
+   freeswitch                       RUNNING   pid 12, uptime 0:01:00
+   redis                            RUNNING   pid 10, uptime 0:01:00
+   voicebot-agent                   RUNNING   pid 15, uptime 0:00:48
+   voicebot-server                  RUNNING   pid 14, uptime 0:00:52
+   ```
 
-```bash
-docker run -d --name voicebot-redis -p 6379:6379 redis:7-alpine
-```
-
-### 4. Start FreeSWITCH
-
-```bash
-# Using host network (recommended — standard ports):
-docker run -d \
-  --name voicebot-fs \
-  --network host \
-  rajunify123/freeswitch-mod-audio-fork
-```
-
-### 5. Verify FreeSWITCH
-
-```bash
-# Check FreeSWITCH is running
-fs_cli -x "status"
-
-# Verify mod_audio_fork is loaded
-fs_cli -x "module_exists mod_audio_fork"
-# Expected output: true
-```
-
-### 6. Install Python Dependencies (in WSL)
-
-```bash
-cd /mnt/c/Users/unify/freeswitch_voicebot
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-> **Note**: `deepfilternet` and `torch` are large downloads (~2GB). The `sentence-transformers` model (`all-MiniLM-L6-v2`, ~90MB) is downloaded on first use.
+3. **Customize settings** by editing environment variables in `docker-compose.yml`:
+   ```yaml
+   environment:
+     - VOICEBOT_EXTENSION=5000     # Change the dial extension
+     - EXTERNAL_IP=127.0.0.1       # NAT IP for SDP
+     - STT_URL=http://your-stt/transcribe
+     - NC_ENABLED=true             # Enable noise cancellation
+   ```
 
 ---
 
-## Running the System
+### Option B: Local Development Setup
 
-### Start Order
-
-You must start services in this order:
-
-```
-1. Redis          (session state backend)
-2. FreeSWITCH     (telephony engine)
-3. server_multicall.py   (audio processor + IVR)
-4. agent.py       (call handler)
-```
-
-### Terminal 1: WebSocket Server
+Volume-mounts your local source code and FreeSWITCH configs into the container for instant live editing without rebuilds.
 
 ```bash
-cd /mnt/c/Users/unify/freeswitch_voicebot
-source venv/bin/activate
-python3 server_multicall.py
+docker compose -f docker-compose.dev.yml up -d
 ```
 
-The server starts on `0.0.0.0:8000` and listens for WebSocket connections at `/media`.
+After editing Python code:
+```bash
+docker exec freeswitch-voicebot supervisorctl restart voicebot-server voicebot-agent
+```
 
-### Terminal 2: ESL Agent
+After editing FreeSWITCH XML configs:
+```bash
+docker exec freeswitch-voicebot fs_cli -x "reloadxml"
+```
+
+---
+
+### Option C: Linux Production Setup (High Performance)
+
+For high-concurrency production deployments on Linux, uses native **host networking** (`network_mode: host`) to avoid Docker NAT overhead.
 
 ```bash
-cd /mnt/c/Users/unify/freeswitch_voicebot
-source venv/bin/activate
-python3 agent.py
+docker compose -f docker-compose.host.yml up -d
 ```
 
-The agent connects to FreeSWITCH ESL on `127.0.0.1:8021` and waits for incoming calls.
+---
 
-### Make a Test Call
+## 📞 Making a Test Call
 
-Configure a SIP softphone (Zoiper, Linphone, MicroSIP) to register with FreeSWITCH:
-- **SIP Server**: `<your-machine-ip>:5060`
-- **Username**: `1000` (default FreeSWITCH user)
-- **Password**: `1234` (default)
+The voicebot works with **any SIP-compliant softphone** (Zoiper, Linphone, MicroSIP, Grandstream Wave, hardware phones, etc.).
 
-Dial any extension to trigger the voicebot.
+Since Docker on Windows runs inside a WSL2 virtual machine, it has limitations with hairpin NAT UDP forwarding. To test successfully:
+
+1. **Configure your softphone** (running on the same host machine):
+   * **Domain / SIP Server**: `127.0.0.1:5060`
+   * **Username / Extension**: `1000` *(Any extension `1000-1019` works)*
+   * **Password**: `1234`
+   * **Transport**: UDP
+
+2. **Dial extension `5000`** (or whatever you set `VOICEBOT_EXTENSION` to):
+   * The bot will answer the call and play the welcome audio greeting.
+   * Speak into your microphone — the bot will process your audio and respond!
+
+3. **Watch the live logs:**
+   ```bash
+   docker compose logs -f
+   ```
+
 
 ---
 

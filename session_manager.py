@@ -28,43 +28,59 @@ class SessionManager:
                  redis_host: str = 'localhost',
                  redis_port: int = 6379,
                  redis_db: int = 0,
-                 session_ttl: int = 3600):
+                 session_ttl: int = 3600,
+                 required: bool = False):
         """
         Initialize session manager
-        
+
         Args:
             redis_host: Redis server host
             redis_port: Redis server port
             redis_db: Redis database number
             session_ttl: Session time-to-live in seconds (1 hour default)
+            required: If True, raise on connection failure. If False (default),
+                      log a warning and continue in degraded mode (no-op methods).
         """
-        self.redis_client = redis.Redis(
-            host=redis_host,
-            port=redis_port,
-            db=redis_db,
-            decode_responses=True
-        )
+        self.redis_client = None
         self.session_ttl = session_ttl
-        
-        # Test connection
+        self._available = False
+
         try:
-            self.redis_client.ping()
+            client = redis.Redis(
+                host=redis_host,
+                port=redis_port,
+                db=redis_db,
+                decode_responses=True
+            )
+            client.ping()
+            self.redis_client = client
+            self._available = True
             logger.info(f"✓ Connected to Redis at {redis_host}:{redis_port}")
         except redis.ConnectionError as e:
-            logger.error(f"❌ Failed to connect to Redis: {e}")
-            raise
+            if required:
+                logger.error(f"❌ Failed to connect to Redis: {e}")
+                raise
+            else:
+                logger.warning(
+                    f"⚠️  Redis unavailable ({e}). "
+                    f"Running in degraded mode (session tracking disabled). "
+                    f"Set REDIS_REQUIRED=True to make this a hard failure."
+                )
     
     def create_session(self, call_uuid: str, metadata: Optional[Dict] = None) -> bool:
         """
         Create a new call session
-        
+
         Args:
             call_uuid: Unique call identifier
             metadata: Optional metadata (caller_number, etc.)
-            
+
         Returns:
             True if session created, False if already exists
         """
+        if not self._available:
+            return True  # silently succeed in degraded mode
+
         session_key = f"session:{call_uuid}"
         
         # Check if session already exists
@@ -97,13 +113,15 @@ class SessionManager:
     def get_session(self, call_uuid: str) -> Optional[Dict[str, Any]]:
         """
         Get session data
-        
+
         Args:
             call_uuid: Call identifier
-            
+
         Returns:
             Session data dict or None if not found
         """
+        if not self._available:
+            return None
         session_key = f"session:{call_uuid}"
         data = self.redis_client.get(session_key)
         
@@ -114,14 +132,16 @@ class SessionManager:
     def update_session(self, call_uuid: str, updates: Dict[str, Any]) -> bool:
         """
         Update session data
-        
+
         Args:
             call_uuid: Call identifier
             updates: Dictionary of fields to update
-            
+
         Returns:
             True if updated, False if session not found
         """
+        if not self._available:
+            return True  # silently succeed in degraded mode
         session = self.get_session(call_uuid)
         if not session:
             return False
@@ -221,19 +241,23 @@ class SessionManager:
     def get_active_sessions(self) -> list:
         """
         Get list of all active session UUIDs
-        
+
         Returns:
             List of active call UUIDs
         """
+        if not self._available:
+            return []
         return list(self.redis_client.smembers('active_sessions'))
-    
+
     def get_session_count(self) -> int:
         """
         Get count of active sessions
-        
+
         Returns:
             Number of active sessions
         """
+        if not self._available:
+            return 0
         return self.redis_client.scard('active_sessions')
     
     def get_stats(self) -> Dict[str, Any]:
@@ -305,14 +329,21 @@ _session_manager_instance: Optional[SessionManager] = None
 
 def get_session_manager(**kwargs) -> SessionManager:
     """
-    Get or create shared SessionManager instance
-    
+    Get or create shared SessionManager instance.
+    Reads REDIS_REQUIRED from config by default (can be overridden via kwargs).
+
     Returns:
         Shared SessionManager instance
     """
     global _session_manager_instance
-    
+
     if _session_manager_instance is None:
+        # Import here to avoid circular imports
+        try:
+            import config as _cfg
+            kwargs.setdefault('required', _cfg.REDIS_REQUIRED)
+        except Exception:
+            pass
         _session_manager_instance = SessionManager(**kwargs)
-    
+
     return _session_manager_instance
