@@ -1,8 +1,19 @@
 # FreeSWITCH VoiceBot
 
+[![Docker Pulls](https://img.shields.io/docker/pulls/rajunify123/freeswitch-voicebot?style=flat-square&logo=docker)](https://hub.docker.com/r/rajunify123/freeswitch-voicebot)
+[![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-blue?logo=github&style=flat-square)](https://github.com/rajshahunify/freeswitch_voicebot)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square)](#)
+
 An **automated IVR voicebot** that handles inbound telephone calls via [FreeSWITCH](https://freeswitch.com), transcribes caller speech in real-time, and navigates a JSON-defined conversation flow — playing pre-recorded audio responses for each step.
 
 The system supports **multiple concurrent calls**, with per-call audio buffering, per-call VAD (Voice Activity Detection), and Redis-backed session management.
+
+> [!TIP]
+> **⚡ Want to get started quickly?** Check out the **[5-Minute Quick Start Guide](QUICKSTART.md)** for a step-by-step walkthrough.
+>
+> **🐳 Docker Hub Images:**
+> - [`rajunify123/freeswitch-voicebot`](https://hub.docker.com/r/rajunify123/freeswitch-voicebot) — All-in-one VoiceBot container
+> - [`rajunify123/freeswitch-mod-audio-fork`](https://hub.docker.com/r/rajunify123/freeswitch-mod-audio-fork) — Base FreeSWITCH image with mod_audio_fork
 
 ---
 
@@ -57,7 +68,7 @@ The system supports **multiple concurrent calls**, with per-call audio buffering
                                                            │
                                                            ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                   Python VoiceBot Server (WSL/Linux)                      │
+│                   Python VoiceBot Server (Docker)                         │
 │                                                                          │
 │   server_multicall.py (FastAPI + WebSocket)                               │
 │   ┌─────────────────────────────────────────────────────────────────┐    │
@@ -176,6 +187,7 @@ For each 32ms audio chunk received:
 | **Audio Buffer** | `audio_pipeline/audio_buffer.py` | Per-call audio accumulation with speech boundary detection |
 | **Flow Engine** | `ivr/json_flow_engine.py` | JSON-driven IVR navigation with hybrid fuzzy+semantic matching |
 | **Response Handler** | `ivr/response_handler.py` | Audio playback via `fs_cli uuid_broadcast` |
+| **Intent Matcher** | `ivr/intent_matcher.py` | Hybrid fuzzy + semantic intent matching engine |
 | **STT Handler** | `stt_handler.py` | HTTP client for Whisper STT API |
 | **Session Manager** | `session_manager.py` | Redis-backed session state and locking |
 
@@ -210,7 +222,7 @@ The `mod_audio_fork` module is **not included** in the standard FreeSWITCH distr
 
 **Image**: `rajunify123/freeswitch-mod-audio-fork`
 
-This is a **multi-stage Docker build** (see `Dockerfile` in `fs_new_docker/`):
+This is a **multi-stage Docker build** (the Dockerfile for this base image is maintained separately — the pre-built image is available on [Docker Hub](https://hub.docker.com/r/rajunify123/freeswitch-mod-audio-fork)):
 
 ### Stage 1: Builder (debian:11)
 
@@ -248,7 +260,7 @@ This is a **multi-stage Docker build** (see `Dockerfile` in `fs_new_docker/`):
 
 ## IVR Flow Engine
 
-The IVR flow is defined in JSON files under `ivr/json_files/`. Each language has its own file (e.g., `en.json`).
+The IVR flow is defined in JSON files under `ivr/flows/`. Each language has its own file (e.g., `en.json`).
 
 ### Flow Structure
 
@@ -306,6 +318,9 @@ Pass 2 — Semantic (sentence-transformers):
 
 Result: Navigate to "payment_options" step, play payment_options.wav
 ```
+
+> [!NOTE]
+> Semantic matching (Pass 2) is **disabled by default** to keep the image lightweight. Only fuzzy matching runs out of the box. To enable it, set `USE_SEMANTIC_MATCHING = True` in `config.py` (requires `sentence-transformers` to be installed).
 
 ---
 
@@ -400,12 +415,16 @@ freeswitch_voicebot/
 ├── requirements.txt                 # Python dependencies
 │
 ├── audio_pipeline/                  # Audio processing modules
-│   ├── improved_noise_canceller.py  # DeepFilterNet2 wrapper
+│   ├── __init__.py                  # Package init + singleton accessors
+│   ├── improved_noise_canceller.py  # DeepFilterNet2 wrapper (active)
+│   ├── noise_canceller.py           # Legacy noise canceller (reference)
 │   ├── vad_detector.py              # Silero VAD + PerCallVADManager
 │   └── audio_buffer.py             # Per-call audio buffering
 │
 ├── ivr/                             # IVR logic
+│   ├── __init__.py                  # Package init
 │   ├── json_flow_engine.py          # JSON-based flow navigation
+│   ├── intent_matcher.py            # Hybrid fuzzy + semantic matching
 │   ├── response_handler.py          # Audio playback via fs_cli
 │   └── flows/                       # Flow definitions
 │       └── en.json                  # English IVR flow
@@ -421,6 +440,7 @@ freeswitch_voicebot/
 │       └── autoload_configs/
 │
 ├── docs/                            # Documentation
+│   ├── DOCKERHUB.md                 # Docker Hub description content
 │   ├── WALKTHROUGH.md               # Detailed debugging history
 │   ├── UPGRADE_PLAN.md              # Future upgrade roadmap
 │   ├── PROJECT_SUMMARY.md           # Architecture summary
@@ -461,6 +481,9 @@ We provide **three compose configurations**:
 | `docker-compose.yml` | Production / default | Bridge (works everywhere) |
 | `docker-compose.dev.yml` | Local development | Bridge + volume mounts |
 | `docker-compose.host.yml` | Linux high-performance | Host networking |
+
+> [!IMPORTANT]
+> **Platform Guide:** `docker-compose.yml` and `docker-compose.dev.yml` work on **all platforms** (Windows, macOS, Linux). The `docker-compose.host.yml` uses host networking and is **Linux only** — Docker Desktop on Windows/macOS does not support `network_mode: host`.
 
 ### Option A: Production / Default Setup
 
@@ -529,7 +552,7 @@ docker compose -f docker-compose.host.yml up -d
 
 The voicebot works with **any SIP-compliant softphone** (Zoiper, Linphone, MicroSIP, Grandstream Wave, hardware phones, etc.).
 
-Since Docker on Windows runs inside a WSL2 virtual machine, it has limitations with hairpin NAT UDP forwarding. To test successfully:
+When testing locally, register your softphone to `127.0.0.1:5060`. On Windows, Docker Desktop uses WSL2 which can have hairpin NAT limitations — using the loopback address avoids this.
 
 1. **Configure your softphone** (running on the same host machine):
    * **Domain / SIP Server**: `127.0.0.1:5060`
@@ -605,11 +628,18 @@ fs_cli -x "load mod_audio_fork"
 
 ### Redis connection refused
 
+Redis runs **inside** the all-in-one container via `supervisord` — there is no separate Redis container to manage.
+
 ```bash
-# Check Redis is running
-docker ps | grep redis
-# Or start it
-docker run -d --name voicebot-redis -p 6379:6379 redis:7-alpine
+# Check if Redis is running inside the container
+docker exec freeswitch-voicebot supervisorctl status redis
+
+# Restart Redis if it's down
+docker exec freeswitch-voicebot supervisorctl restart redis
+
+# Verify Redis is responding
+docker exec freeswitch-voicebot redis-cli ping
+# Expected output: PONG
 ```
 
 ---

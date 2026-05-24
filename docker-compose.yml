@@ -24,7 +24,7 @@ services:
       #   - Set to your server's public IP for remote / production access
       - EXTERNAL_IP=127.0.0.1
       # The extension number callers dial to reach the voicebot
-      - VOICEBOT_EXTENSION=7000
+      - VOICEBOT_EXTENSION=5000
       # Inside the container, all services talk over localhost
       - FREESWITCH_HOST=127.0.0.1
       - FREESWITCH_PORT=8021
