@@ -1,15 +1,29 @@
 """
 IVR (Interactive Voice Response) Module
-Intent matching and response handling
+- ResponseHandler: Audio playback via FreeSWITCH (actively used)
+- LLMAgent: AI-powered conversation (NEW — replaces FlowEngine)
+- FlowEngine, IntentMatcher: Legacy keyword matching (kept for reference)
 """
 
-from .intent_matcher import IntentMatcher, SemanticIntentMatcher
 from .response_handler import ResponseHandler
-from .json_flow_engine import FlowEngine
+
+# New AI-powered agent
+from .llm_agent import create_llm_agent, BaseLLMProvider
+
+# Legacy imports — optional, may fail if sentence-transformers not installed
+try:
+    from .intent_matcher import IntentMatcher, SemanticIntentMatcher
+    from .json_flow_engine import FlowEngine
+except ImportError:
+    IntentMatcher = None
+    SemanticIntentMatcher = None
+    FlowEngine = None
 
 __all__ = [
+    'ResponseHandler',
+    'create_llm_agent',
+    'BaseLLMProvider',
     'IntentMatcher',
     'SemanticIntentMatcher',
-    'ResponseHandler',
-    'FlowEngine'
+    'FlowEngine',
 ]

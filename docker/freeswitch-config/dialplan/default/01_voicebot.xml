@@ -11,7 +11,7 @@
       <action application="sleep" data="500"/>
 
       <!-- Fork audio to the Python WebSocket server running in the same container -->
-      <action application="set" data="execute_on_answer=uuid_audio_fork ${uuid} start ws://127.0.0.1:8000/media mono 16k"/>
+      <action application="set" data="execute_on_answer=uuid_audio_fork ${uuid} start ws://127.0.0.1:8000/media"/>
 
       <!-- Park the call (keeps it alive while audio is streamed) -->
       <action application="park"/>

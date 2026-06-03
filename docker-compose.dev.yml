@@ -23,6 +23,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: freeswitch-voicebot
+    env_file:
+      - .env
     ports:
       - "5060:5060/udp"
       - "5060:5060/tcp"
@@ -82,3 +84,5 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

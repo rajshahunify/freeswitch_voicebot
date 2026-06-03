@@ -14,13 +14,13 @@ torchaudio
 # DeepFilterNet2
 deepfilternet
 
-# STT / HTTP requests
+# HTTP requests
 requests
 
-# Intent matching
+# Intent matching (LEGACY — kept for backward compatibility)
 fuzzywuzzy
 python-Levenshtein
-sentence-transformers
+# sentence-transformers  # REMOVED — replaced by LLM, saves ~1GB image size
 
 # Utilities
 python-multipart
@@ -29,3 +29,17 @@ python-multipart
 resampy
 
 redis
+
+# ──── NEW: AI Pipeline Dependencies ────
+
+# STT — local Faster-Whisper (only needed when STT_PROVIDER=local)
+faster-whisper
+
+# TTS — Edge-TTS (free, no API key)
+edge-tts
+
+# LLM — Gemini API client (NEW SDK — old google-generativeai is deprecated/broken)
+google-genai
+
+# Audio format conversion (MP3→WAV for Edge-TTS output)
+pydub

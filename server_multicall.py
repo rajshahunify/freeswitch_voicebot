@@ -1,7 +1,16 @@
 """
 FreeSWITCH VoiceBot - Multi-Call WebSocket Server
 Handles multiple concurrent calls with Redis-based session management
+
+Pipeline: Audio → NC → VAD → STT → LLM → TTS → Playback
+Supports: barge-in, streaming LLM→TTS, switchable providers
 """
+
+# Suppress torchaudio deprecation warnings (floods logs with 6+ lines per TTS call)
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
+warnings.filterwarnings("ignore", message=".*torio.io.*")
+warnings.filterwarnings("ignore", message=".*TorchCodec.*")
 
 import uvicorn
 from contextlib import asynccontextmanager
@@ -23,9 +32,16 @@ from audio_pipeline import (
     CallAudioManager
 )
 from audio_pipeline.vad_detector import PerCallVADManager
-from ivr import ResponseHandler, FlowEngine
-from stt_handler import STTHandler
+from audio_pipeline.tts_synthesizer import TTSSynthesizer
+from ivr import ResponseHandler
+from ivr.llm_agent import create_llm_agent
+from stt_handler import create_stt_handler
 from session_manager import get_session_manager
+from latency_tracker import LatencyTracker
+from event_emitter import (
+    emit_event, emit_transcription, emit_bot_response,
+    emit_barge_in, emit_turn_metrics, emit_speech_started, emit_speech_ended
+)
 
 # =============================================================================
 # LOGGING SETUP
@@ -58,8 +74,86 @@ async def lifespan(app: FastAPI):
     # Startup
     asyncio.create_task(cleanup_stale_sessions())
     logger.info("✓ Background cleanup task started")
+    
+    # Background LLM health check — proactively test Gemini every 60s
+    # so we don't waste call time discovering it's down
+    asyncio.create_task(llm_health_check_loop())
+    logger.info("✓ Background LLM health check started")
+    
     yield
     # Shutdown (nothing to do currently)
+
+
+async def llm_health_check_loop():
+    """
+    Background health check for Gemini availability.
+    
+    Only runs when we're on fallback (Ollama). Checks if Gemini has recovered.
+    When quota is exhausted, backs off to 30-minute intervals.
+    When Gemini is healthy, does NOT ping it (saves API quota).
+    
+    Also disables FallbackLLM's own internal retry so we don't get
+    duplicate Gemini attempts during live calls.
+    """
+    await asyncio.sleep(2)  # Brief wait for server init
+    
+    # Disable FallbackLLM's own internal retry — this health check manages it
+    if hasattr(llm_agent, '_retry_interval'):
+        llm_agent._retry_interval = 999999  # Effectively infinite — health check handles retries
+    
+    # Initial startup probe: test Gemini ONCE to know the state
+    if hasattr(llm_agent, 'primary') and hasattr(llm_agent, 'using_fallback'):
+        try:
+            test_response = llm_agent.primary.get_response("Say OK", [])
+            if test_response and "I'm sorry, I'm having a moment" not in test_response:
+                logger.info("✅ Startup check: Gemini is available")
+            else:
+                logger.warning("⚠️ Startup check: Gemini unavailable — starting with Ollama")
+                llm_agent.using_fallback = True
+        except Exception:
+            logger.warning("⚠️ Startup check: Gemini unreachable — starting with Ollama")
+            llm_agent.using_fallback = True
+    
+    check_interval = 60  # Normal check every 60s
+    quota_interval = 1800  # When quota exhausted, check every 30 min
+    
+    while True:
+        try:
+            if hasattr(llm_agent, 'primary') and hasattr(llm_agent, 'using_fallback'):
+                if not llm_agent.using_fallback:
+                    # Gemini is healthy — don't ping, don't waste quota
+                    await asyncio.sleep(check_interval)
+                    continue
+                
+                # Currently on Ollama — check if Gemini recovered
+                # If daily quota exhausted, use longer interval
+                if hasattr(llm_agent.primary, 'daily_quota_exhausted') and llm_agent.primary.daily_quota_exhausted:
+                    logger.debug(f"⏳ Gemini daily quota exhausted — next check in {quota_interval}s")
+                    await asyncio.sleep(quota_interval)
+                    # Reset flag to allow a test
+                    llm_agent.primary.daily_quota_exhausted = False
+                
+                # Try a lightweight Gemini call
+                try:
+                    test_response = llm_agent.primary.get_response("Say OK", [])
+                    if test_response and "I'm sorry, I'm having a moment" not in test_response:
+                        logger.info("✅ Gemini recovered! Switching back from Ollama.")
+                        llm_agent.using_fallback = False
+                        llm_agent.consecutive_failures = 0
+                    else:
+                        logger.info("⏳ Gemini still failing — staying on Ollama")
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if 'limit: 0' in error_str or 'quota' in error_str:
+                        if hasattr(llm_agent.primary, 'daily_quota_exhausted'):
+                            llm_agent.primary.daily_quota_exhausted = True
+                        logger.info("⏳ Gemini daily quota still exhausted — staying on Ollama")
+                    else:
+                        logger.info(f"⏳ Gemini error ({type(e).__name__}) — staying on Ollama")
+        except Exception as e:
+            logger.error(f"LLM health check error: {e}")
+        
+        await asyncio.sleep(check_interval)
 
 app = FastAPI(title="FreeSWITCH VoiceBot - Multi-Call", lifespan=lifespan)
 
@@ -111,25 +205,57 @@ buffer_manager = CallAudioManager(
     timeout_seconds=config.BUFFER_TIMEOUT_SECONDS
 )
 
-# IVR components
-flow_engine = FlowEngine()
-
+# Response handler (plays audio to caller via FreeSWITCH)
 response_handler = ResponseHandler(
     audio_base_path=config.AUDIO_BASE_PATH,
     allow_interruptions=config.ALLOW_INTERRUPTIONS,
     speaking_timeout=config.BOT_SPEAKING_TIMEOUT
 )
 
-# STT handler (shared, thread-safe)
-stt_handler = STTHandler(
+# STT handler (switchable: remote HTTP API or local Faster-Whisper)
+stt_handler = create_stt_handler(
+    provider=config.STT_PROVIDER,
     stt_url=config.STT_URL,
     stt_params=config.STT_PARAMS,
-    timeout=config.STT_TIMEOUT
+    stt_timeout=config.STT_TIMEOUT,
+    model_size=config.STT_LOCAL_MODEL,
+    device=config.STT_LOCAL_DEVICE,
+    compute_type=config.STT_LOCAL_COMPUTE_TYPE,
+    fallback_enabled=config.STT_FALLBACK_ENABLED,
+    fallback_threshold=config.STT_FALLBACK_THRESHOLD,
+)
+
+# LLM agent (switchable: Gemini, Groq, or Ollama with fallback)
+llm_agent = create_llm_agent(
+    provider=config.LLM_PROVIDER,
+    gemini_api_key=config.GEMINI_API_KEY,
+    gemini_model=config.GEMINI_MODEL,
+    ollama_url=config.OLLAMA_URL,
+    ollama_model=config.OLLAMA_MODEL,
+    groq_api_key=config.GROQ_API_KEY,
+    groq_model=config.GROQ_MODEL,
+    system_prompt_file=config.LLM_SYSTEM_PROMPT_FILE,
+    fallback_enabled=config.LLM_FALLBACK_ENABLED,
+    fallback_threshold=config.LLM_FALLBACK_THRESHOLD,
+)
+
+# TTS synthesizer (Edge-TTS with Redis caching)
+try:
+    redis_client = session_manager.redis_client
+except Exception:
+    redis_client = None
+
+tts_synthesizer = TTSSynthesizer(
+    voice=config.TTS_VOICE,
+    cache_dir=config.TTS_CACHE_DIR,
+    redis_client=redis_client,
 )
 
 logger.info("✓ All components initialized")
 logger.info(f"✓ Worker ID: {config.WORKER_ID}")
 logger.info(f"✓ Max concurrent calls: {config.MAX_CONCURRENT_CALLS}")
+logger.info(f"✓ STT: {config.STT_PROVIDER} | LLM: {config.LLM_PROVIDER} | TTS: {config.TTS_VOICE}")
+logger.info(f"✓ Barge-in: {'enabled' if config.ALLOW_INTERRUPTIONS else 'disabled'}")
 if config.DF_DEBUG_SAVE_DIR:
     logger.info(f"📁 Debug audio files will be saved to: {config.DF_DEBUG_SAVE_DIR}")
 logger.info("=" * 60)
@@ -210,78 +336,174 @@ def _schedule_call_hangup(call_uuid: str, audio_file: str = None):
 
 def process_audio_segment(audio_data: bytes, call_uuid: str):
     """
-    Process complete audio segment through full pipeline
-    This runs in a thread pool to avoid blocking
-    """
-    # Check if bot is speaking (and interruptions not allowed)
-    if not config.ALLOW_INTERRUPTIONS and response_handler.is_speaking(call_uuid):
-        logger.debug(f"[{call_uuid}] 🔇 Ignoring audio - bot is speaking")
-        return
+    Process complete audio segment through the full AI pipeline.
     
-    pipeline_start = time.time()
+    Pipeline: NC → STT → LLM (streaming) → TTS (per-sentence) → Playback
+    
+    This runs in a thread pool to avoid blocking the WebSocket loop.
+    """
+    # Barge-in check: if bot is speaking, either interrupt or ignore
+    if response_handler.is_speaking(call_uuid):
+        if config.ALLOW_INTERRUPTIONS:
+            # BARGE-IN: Stop the bot and process the new speech
+            logger.info(f"[{call_uuid}] 🛑 BARGE-IN: User interrupted bot")
+            try:
+                subprocess.run(
+                    ["fs_cli", "-x", f"uuid_break {call_uuid} all"],
+                    capture_output=True, timeout=2
+                )
+            except Exception:
+                pass
+            response_handler.mark_stopped(call_uuid)
+            emit_barge_in(call_uuid)
+        else:
+            logger.debug(f"[{call_uuid}] 🔇 Ignoring audio - bot is speaking")
+            return
+    
+    # Clear any stale barge-in flag from previous interaction
+    response_handler.clear_barge_in(call_uuid)
+    
+    tracker = LatencyTracker(call_uuid)
     
     try:
         # Step 1: Noise Cancellation (skipped if NC_ENABLED=false)
-        nc_start = time.time()
+        tracker.start("nc")
         if noise_canceller is not None:
             enhanced_audio = noise_canceller.process_utterance(audio_data)
         else:
             enhanced_audio = audio_data  # passthrough
-        nc_time = (time.time() - nc_start) * 1000
+        tracker.stop("nc")
         
-        # Step 2: STT Transcription
-        stt_start = time.time()
+        # Step 2: STT Transcription (switchable provider)
+        tracker.start("stt")
         text = stt_handler.transcribe(enhanced_audio)
-        stt_time = (time.time() - stt_start) * 1000
+        tracker.stop("stt")
         
-        # If STT returned nothing, treat as unrecognized input
-        # This prevents the bot from hanging when input was too quiet/noisy
+        # If STT returned nothing, skip LLM — don't waste a call
         if not text:
-            logger.info(f"[{call_uuid}] 🔇 STT returned empty — treating as unrecognized speech")
-            text = ""  # Pass empty text so flow engine triggers retry/sorry prompt
+            logger.info(f"[{call_uuid}] 🔇 STT returned empty — ignoring")
+            return
         
-        # Step 3: IVR Flow Process
-        intent_start = time.time()
+        # Emit transcription event
+        emit_transcription(call_uuid, text, tracker.get_component_ms("stt"), config.STT_PROVIDER)
         
-        # Fetch session state to pass to the engine
+        # Step 3: Get conversation history from session
         session_meta = session_manager.get_session(call_uuid) or {}
-        flow_state = session_meta.get("flow_state", {})
+        history = session_meta.get("conversation_history", [])
         
-        answer_text, audio_file, should_end, is_fallback = flow_engine.process_input(flow_state, text)
+        # Step 4: LLM Response (streaming) → concurrent TTS → Playback
+        tracker.start("llm")
         
-        intent_time = (time.time() - intent_start) * 1000
+        full_response = ""
+        first_sentence = True
         
-        # Step 4: Play Response
-        response_start = time.time()
-        if audio_file:
-            response_handler.play_audio(call_uuid, audio_file, answer_text)
-        response_time = (time.time() - response_start) * 1000
+        import queue
+        sentence_queue = queue.Queue()
+        producer_done = False
         
-        # Update session activity
-        session_meta['flow_state'] = flow_state
-        session_meta['last_transcription'] = text
-        session_meta['last_audio'] = audio_file
+        # Producer thread to stream sentences from the LLM
+        def llm_producer():
+            nonlocal producer_done
+            try:
+                for sentence in llm_agent.get_response_streaming(text, history):
+                    sentence_queue.put(sentence)
+            except Exception as e:
+                logger.error(f"[{call_uuid}] LLM producer error: {e}", exc_info=True)
+            finally:
+                producer_done = True
+                sentence_queue.put(None)  # EOF Sentinel
+        
+        producer_thread = threading.Thread(target=llm_producer, daemon=True)
+        producer_thread.start()
+        
+        from concurrent.futures import ThreadPoolExecutor as TtsPool
+        pending_futures: list = []  # List of Future objects
+        first_audio_played = False
+        
+        # 2 threads: one synthesizing, one ready
+        try:
+            with TtsPool(max_workers=2) as tts_pool:
+                while not producer_done or pending_futures or not sentence_queue.empty():
+                    # 1. Fetch new sentences from queue without blocking
+                    try:
+                        sentence = sentence_queue.get_nowait()
+                        if sentence is not None:
+                            if first_sentence:
+                                tracker.stop("llm")
+                                tracker.start("tts")
+                                first_sentence = False
+                            
+                            full_response += sentence + " "
+                            # Submit TTS to thread pool immediately (non-blocking)
+                            future = tts_pool.submit(tts_synthesizer.synthesize, sentence)
+                            pending_futures.append(future)
+                    except queue.Empty:
+                        pass
+                    
+                    # 2. Check if the next pending TTS is complete
+                    if pending_futures and pending_futures[0].done():
+                        future = pending_futures.pop(0)
+                        try:
+                            wav_path = future.result()
+                            if wav_path:
+                                tracker.mark_first_audio_sent()
+                                response_handler.play_audio_queued(call_uuid, wav_path)
+                                first_audio_played = True
+                        except Exception as e:
+                            logger.warning(f"[{call_uuid}] TTS future error: {e}")
+                    
+                    # 3. Check for barge-in (user actually spoke during playback)
+                    if config.ALLOW_INTERRUPTIONS and response_handler.was_barge_in(call_uuid):
+                        logger.info(f"[{call_uuid}] 🛑 Barge-in detected, stopping TTS pipeline")
+                        response_handler.clear_barge_in(call_uuid)
+                        # Cancel remaining futures
+                        for f in pending_futures:
+                            f.cancel()
+                        pending_futures.clear()
+                        break
+                    
+                    # 4. Sleep briefly to avoid CPU spinning
+                    time.sleep(0.02)
+        finally:
+            pass
+        
+        if first_sentence:
+            # LLM returned nothing or errored before yielding
+            tracker.stop("llm")
+            tracker.start("tts")
+        
+        tracker.stop("tts")
+        
+        full_response = full_response.strip()
+        
+        # Emit bot response event (use actual provider, not config default)
+        actual_provider = config.LLM_PROVIDER
+        if hasattr(llm_agent, 'using_fallback') and llm_agent.using_fallback:
+            actual_provider = llm_agent.fallback.name if hasattr(llm_agent, 'fallback') else "ollama"
+        emit_bot_response(call_uuid, full_response, tracker.get_component_ms("llm"), actual_provider)
+        
+        # Step 6: Update conversation history in session
+        history.append({"role": "user", "text": text})
+        history.append({"role": "assistant", "text": full_response})
+        
+        # Trim history to max length
+        if len(history) > config.LLM_MAX_HISTORY * 2:
+            history = history[-(config.LLM_MAX_HISTORY * 2):]
+        
+        session_meta["conversation_history"] = history
+        session_meta["last_transcription"] = text
+        session_meta["last_response"] = full_response
         session_manager.update_session(call_uuid, session_meta)
         
-        if should_end:
-            logger.info(f"[{call_uuid}] Call flow ended.")
-            # Schedule call disconnect after audio finishes + delay
-            threading.Thread(
-                target=_schedule_call_hangup,
-                args=(call_uuid, audio_file),
-                daemon=True
-            ).start()
-        
-        # Log performance
-        total_time = (time.time() - pipeline_start) * 1000
+        # Step 7: Log full latency breakdown + RTT
         if config.ENABLE_TIMING_LOGS:
-            logger.info(
-                f"[{call_uuid}] ⏱️  Pipeline: NC={nc_time:.0f}ms, "
-                f"STT={stt_time:.0f}ms, "
-                f"Intent={intent_time:.0f}ms, "
-                f"Response={response_time:.0f}ms, "
-                f"Total={total_time:.0f}ms"
-            )
+            tracker.log_summary(providers={
+                "stt": config.STT_PROVIDER,
+                "llm": actual_provider,
+            })
+        
+        # Emit turn metrics event
+        emit_turn_metrics(call_uuid, tracker.summary())
         
     except Exception as e:
         logger.error(f"[{call_uuid}] ❌ Error processing audio segment: {e}", exc_info=True)
@@ -360,20 +582,25 @@ async def websocket_endpoint(websocket: WebSocket):
         # Get buffer for this call
         audio_buffer = buffer_manager.get_buffer(call_uuid)
 
-        # Set up IVR Flow state
+        # Initialize conversation session
         session_meta = session_manager.get_session(call_uuid) or {}
-        session_meta['flow_state'] = {"lang": "en"}
+        session_meta['conversation_history'] = []
         session_manager.update_session(call_uuid, session_meta)
-        ans_text, ans_audio = flow_engine.get_initial_step()
         
-        # Stop any existing audio and play welcome
+        # Generate and play welcome message via TTS
+        welcome_text = "Hello! Welcome to Unified Reach Fiber. How can I help you today?"
+        
+        # Stop any existing audio
         subprocess.run(
             ["fs_cli", "-x", f"uuid_break {call_uuid} all"],
             capture_output=True
         )
         await asyncio.sleep(0.5)
-        if ans_audio:
-            response_handler.play_audio(call_uuid, ans_audio, ans_text)
+        
+        # Synthesize welcome and play (use await since we're in an async handler)
+        welcome_wav = await tts_synthesizer.synthesize_awaitable(welcome_text)
+        if welcome_wav:
+            response_handler.play_audio(call_uuid, welcome_wav, welcome_text)
         
         # Main audio processing loop
         chunk_count = 0
@@ -435,11 +662,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     vad_silence_count += 1
                 
-                # Log VAD events
+                # Log VAD events + emit WebSocket events
                 if vad_result.get('speech_start'):
                     logger.info(f"[{call_uuid}] 🎤 SPEECH START (prob: {vad_result['probability']:.2f})")
+                    emit_speech_started(call_uuid)
+                    
+                    # Interruption logic (barge-in): stop playback instantly when user starts speaking
+                    if response_handler.is_speaking(call_uuid) and config.ALLOW_INTERRUPTIONS:
+                        logger.info(f"[{call_uuid}] 🛑 BARGE-IN: User started speaking, stopping bot playback immediately")
+                        try:
+                            subprocess.run(
+                                ["fs_cli", "-x", f"uuid_break {call_uuid} all"],
+                                capture_output=True, timeout=2
+                            )
+                        except Exception as e:
+                            logger.error(f"Error running uuid_break: {e}")
+                        response_handler.mark_stopped(call_uuid)
+                        emit_barge_in(call_uuid)
                 if vad_result.get('speech_end'):
+                    duration_ms = vad_speech_count * config.CHUNK_DURATION_MS
                     logger.info(f"[{call_uuid}] 🎤 SPEECH END (speech={vad_speech_count}, silence={vad_silence_count})")
+                    emit_speech_ended(call_uuid, duration_ms)
                     vad_speech_count = 0
                     vad_silence_count = 0
                 
@@ -487,7 +730,9 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.info("=" * 60)
             logger.info(f"📊 CALL {call_uuid} STATISTICS")
             logger.info(f"   Active calls remaining: {len(active_connections)}")
-            logger.info(f"   STT: {stt_handler.get_stats()}")
+            logger.info(f"   STT [{config.STT_PROVIDER}]: {stt_handler.get_stats()}")
+            logger.info(f"   LLM [{config.LLM_PROVIDER}]: {llm_agent.get_stats()}")
+            logger.info(f"   TTS: {tts_synthesizer.get_stats()}")
             logger.info(f"   Response: {response_handler.get_stats()}")
             if config.DF_DEBUG_SAVE_DIR:
                 logger.info(f"   Debug audio saved to: {config.DF_DEBUG_SAVE_DIR}")
@@ -520,17 +765,30 @@ async def cleanup_stale_sessions():
 @app.get("/health")
 async def health_check():
     """Health check endpoint with multi-call stats"""
+    redis_ok = False
+    try:
+        redis_ok = session_manager.redis_client.ping()
+    except Exception:
+        pass
+    
     return {
         "status": "healthy",
         "worker_id": config.WORKER_ID,
         "components": {
-            "noise_canceller": "loaded",
+            "noise_canceller": "loaded" if noise_canceller else "disabled",
             "vad_detector": "loaded",
-            "stt_handler": "ready",
-            "flow_engine": f"{len(flow_engine.flows)} flows loaded",
+            "stt_handler": f"ready ({config.STT_PROVIDER})",
+            "llm_agent": f"ready ({config.LLM_PROVIDER})",
+            "tts_synthesizer": f"ready ({config.TTS_VOICE})",
             "response_handler": "ready",
             "session_manager": "ready",
-            "redis": session_manager.redis_client.ping()
+            "redis": redis_ok,
+        },
+        "providers": {
+            "stt": config.STT_PROVIDER,
+            "llm": config.LLM_PROVIDER,
+            "tts_voice": config.TTS_VOICE,
+            "barge_in": config.ALLOW_INTERRUPTIONS,
         },
         "capacity": {
             "active_calls": len(active_connections),
@@ -539,6 +797,8 @@ async def health_check():
         },
         "sessions": session_manager.get_stats(),
         "stt_stats": stt_handler.get_stats(),
+        "llm_stats": llm_agent.get_stats(),
+        "tts_stats": tts_synthesizer.get_stats(),
         "debug_enabled": config.DF_DEBUG_SAVE_DIR is not None
     }
 
@@ -552,12 +812,19 @@ async def get_stats():
             "active_connections": len(active_connections),
             "max_concurrent": config.MAX_CONCURRENT_CALLS
         },
+        "providers": {
+            "stt": config.STT_PROVIDER,
+            "llm": config.LLM_PROVIDER,
+            "tts_voice": config.TTS_VOICE,
+        },
         "sessions": session_manager.get_stats(),
         "stt": stt_handler.get_stats(),
+        "llm": llm_agent.get_stats(),
+        "tts": tts_synthesizer.get_stats(),
         "response_handler": response_handler.get_stats(),
         "buffer_manager": buffer_manager.get_all_stats(),
         "config": {
-            "noise_cancellation": config.DF_MODEL,
+            "noise_cancellation": config.DF_MODEL if config.NC_ENABLED else "disabled",
             "nc_attenuation": config.DF_ATTENUATION_LIMIT,
             "nc_gain": config.DF_GAIN,
             "vad_threshold": config.VAD_THRESHOLD,
@@ -590,18 +857,32 @@ async def list_sessions():
 # =============================================================================
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting FreeSWITCH VoiceBot Server (Multi-Call Mode)")
+    logger.info("🚀 Starting FreeSWITCH VoiceBot Server (AI-Powered, Multi-Call)")
     logger.info(f"   Server: {config.WS_HOST}:{config.WS_PORT}")
     logger.info(f"   Worker ID: {config.WORKER_ID}")
     logger.info(f"   Max Concurrent: {config.MAX_CONCURRENT_CALLS}")
     logger.info(f"   Redis: {config.REDIS_HOST}:{config.REDIS_PORT}")
-    logger.info(f"   STT: {config.STT_URL}")
+    logger.info(f"   STT: {config.STT_PROVIDER} ({'→ ' + config.STT_URL if config.STT_PROVIDER == 'remote' else config.STT_LOCAL_MODEL})")
+    logger.info(f"   LLM: {config.LLM_PROVIDER} ({config.GEMINI_MODEL if config.LLM_PROVIDER == 'gemini' else config.OLLAMA_MODEL})")
+    logger.info(f"   TTS: Edge-TTS ({config.TTS_VOICE})")
+    logger.info(f"   Barge-in: {'enabled' if config.ALLOW_INTERRUPTIONS else 'disabled'}")
     logger.info(f"   Audio: {config.AUDIO_BASE_PATH}")
-    logger.info(f"   NC Model: {config.DF_MODEL} (atten={config.DF_ATTENUATION_LIMIT}dB, gain={config.DF_GAIN}x)")
+    if config.NC_ENABLED:
+        logger.info(f"   NC Model: {config.DF_MODEL} (atten={config.DF_ATTENUATION_LIMIT}dB, gain={config.DF_GAIN}x)")
+    else:
+        logger.info(f"   NC: DISABLED")
     logger.info(f"   VAD Threshold: {config.VAD_THRESHOLD}")
     if config.DF_DEBUG_SAVE_DIR:
         logger.info(f"   Debug Audio: {config.DF_DEBUG_SAVE_DIR}")
     logger.info("=" * 60)
+    
+    # Suppress noisy /health access logs (Docker pings every ~10s)
+    class HealthCheckFilter(logging.Filter):
+        def filter(self, record):
+            msg = record.getMessage()
+            return "/health" not in msg
+    
+    logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())
     
     uvicorn.run(
         app,
@@ -609,3 +890,4 @@ if __name__ == "__main__":
         port=config.WS_PORT,
         log_level=config.LOG_LEVEL.lower()
     )
+

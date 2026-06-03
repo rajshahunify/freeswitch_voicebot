@@ -67,7 +67,9 @@ RUN sed -i 's|<!-- <param name="rtp-start-port" value="16384"/> -->|<param name=
     sed -i 's|<!-- <param name="rtp-end-port" value="32768"/> -->|<param name="rtp-end-port" value="16394"/>|' /usr/local/freeswitch/conf/autoload_configs/switch.conf.xml
 
 # Rename conflicting default ivr_demo destination number from 5000 to 9999
-RUN sed -i 's|expression="^5000$"|expression="^9999$"|g' /usr/local/freeswitch/conf/dialplan/default.xml
+# Also remove the sleep(10000) in the default_password warning block — it delays every call by 10s
+RUN sed -i 's|expression="^5000$"|expression="^9999$"|g' /usr/local/freeswitch/conf/dialplan/default.xml && \
+    sed -i '/sleep.*10000/d' /usr/local/freeswitch/conf/dialplan/default.xml
 
 # Configure FreeSWITCH to use the EXTERNAL_IP environment variable for NAT SIP and RTP IPs
 RUN sed -i 's|<X-PRE-PROCESS cmd="stun-set" data="external_rtp_ip=stun:stun.freeswitch.org"/>|<X-PRE-PROCESS cmd="set" data="external_rtp_ip=$${env(EXTERNAL_IP)}"/>|g' /usr/local/freeswitch/conf/vars.xml && \
@@ -104,11 +106,12 @@ print('✓ Silero VAD model pre-cached')" \
 
 # Copy application code
 COPY config.py agent.py server_multicall.py stt_handler.py session_manager.py ./
+COPY latency_tracker.py event_emitter.py ./
 COPY audio_pipeline/ ./audio_pipeline/
 COPY ivr/ ./ivr/
 
-# Create runtime directories
-RUN mkdir -p logs models debug_audio
+# Create runtime directories (tts_cache is mounted as a volume)
+RUN mkdir -p logs models debug_audio tts_cache
 
 # =============================================================================
 # 5. SUPERVISOR CONFIGURATION
@@ -119,7 +122,8 @@ COPY docker/supervisord.conf /etc/supervisor/conf.d/voicebot.conf
 # 5b. ENTRYPOINT SCRIPT (dynamic config injection at startup)
 # =============================================================================
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Fix Windows \r\n line endings → Linux \n (prevents "exec: no such file or directory")
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # =============================================================================
 # 6. PORTS
@@ -147,7 +151,17 @@ ENV FREESWITCH_HOST=127.0.0.1 \
     DF_USE_GPU=false \
     NC_ENABLED=false \
     EXTERNAL_IP=127.0.0.1 \
-    VOICEBOT_EXTENSION=5000
+    VOICEBOT_EXTENSION=5000 \
+    STT_PROVIDER=remote \
+    LLM_PROVIDER=gemini \
+    GEMINI_MODEL=gemini-2.0-flash \
+    OLLAMA_URL=http://ollama:11434 \
+    OLLAMA_MODEL=qwen2.5:0.5b \
+    TTS_VOICE=en-US-GuyNeural \
+    TTS_CACHE_DIR=/app/tts_cache \
+    ALLOW_INTERRUPTIONS=true \
+    STT_LOCAL_MODEL=small \
+    STT_LOCAL_DEVICE=cpu
 
 # =============================================================================
 # 8. ENTRYPOINT

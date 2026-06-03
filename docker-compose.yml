@@ -1,9 +1,89 @@
 services:
+
+  # ===========================================================================
+  # OLLAMA — Local LLM Server (optional, only needed when LLM_PROVIDER=ollama)
+  # ===========================================================================
+  # Ollama runs Qwen, Llama, Mistral etc. locally — no API key, no cost ever.
+  # On first start it will download the model (~400MB for qwen2.5:0.5b).
+  # Model files are stored in the ollama_data volume — only downloaded once.
+  #
+  # To skip Ollama (when using Gemini), run:
+  #   docker compose up voicebot   ← starts only the voicebot
+  # To use Ollama:
+  #   docker compose --profile ollama up
+  # ===========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: voicebot-ollama
+    profiles:
+      - ollama           # ← Only starts when you add --profile ollama
+    ports:
+      - "11434:11434"    # Ollama API accessible from host (optional, for testing)
+    volumes:
+      - ollama_data:/root/.ollama   # ← Model files stored here across restarts
+    environment:
+      - OLLAMA_HOST=0.0.0.0         # Listen on all interfaces inside container
+      # Optional: limit RAM usage
+      # - OLLAMA_MAX_LOADED_MODELS=1
+      # - OLLAMA_NUM_PARALLEL=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - voicebot-net
+
+  # ---------------------------------------------------------------------------
+  # One-shot container: auto-pulls the model when Ollama first starts.
+  # Runs, downloads model if needed, then exits. Won't re-download on restart.
+  # ---------------------------------------------------------------------------
+  ollama-model-pull:
+    image: curlimages/curl:latest
+    container_name: voicebot-ollama-model-pull
+    profiles:
+      - ollama
+    env_file:
+      - .env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        MODEL="${OLLAMA_MODEL:-qwen2.5:0.5b}"
+        OLLAMA_URL="http://ollama:11434"
+        echo "Waiting for Ollama server..."
+        until curl -sf "$${OLLAMA_URL}/api/tags" > /dev/null 2>&1; do
+          sleep 2
+          echo "  Still waiting..."
+        done
+        echo "Ollama ready. Checking if model '$${MODEL}' exists..."
+        if curl -sf "$${OLLAMA_URL}/api/tags" | grep -q "\"$${MODEL}\""; then
+          echo "Model '$${MODEL}' already downloaded."
+        else
+          echo "Pulling model '$${MODEL}'..."
+          curl -s "$${OLLAMA_URL}/api/pull" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\": \"$${MODEL}\"}"
+          echo "Model '$${MODEL}' ready!"
+        fi
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - voicebot-net
+    restart: "no"   # Run once and exit
+
+  # ===========================================================================
+  # VOICEBOT — FreeSWITCH + Python AI Pipeline
+  # ===========================================================================
   voicebot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: freeswitch-voicebot
+    env_file:
+      - .env
     # -----------------------------------------------------------------------
     # BRIDGE NETWORKING (Windows, macOS, and Linux support)
     # All configs are baked into the image and dynamically patched by
@@ -32,8 +112,31 @@ services:
       # WebSocket URL used by mod_audio_fork to stream caller audio
       - WEBSOCKET_URL=ws://127.0.0.1:8000/media
 
-      # ── Speech-to-Text (STT) ──────────────────────────────────────────
-      - STT_URL=http://164.52.203.140:8890/transcribe
+      # ── STT Provider ───────────────────────────────────────────────────
+      # "remote" = external HTTP API  |  "local" = Faster-Whisper in-process
+      # All defaults come from .env — uncomment to override:
+      # - STT_PROVIDER=remote
+      # - STT_REMOTE_URL=http://164.52.203.140:8890/transcribe
+      # - STT_LOCAL_MODEL=small
+      # - STT_LOCAL_DEVICE=cpu
+
+      # ── LLM Provider ───────────────────────────────────────────────────
+      # "gemini" = Google Gemini API  |  "ollama" = Local Ollama  |  "groq" = Groq cloud
+      # All defaults come from .env — uncomment to override:
+      # - LLM_PROVIDER=gemini
+      # - GEMINI_API_KEY=your-key    ← set in .env, NOT here (security!)
+      # - LLM_PROVIDER=ollama
+      # - OLLAMA_URL=http://ollama:11434   ← uses ollama service on same network
+      # - OLLAMA_MODEL=qwen2.5:0.5b
+      # - LLM_PROVIDER=groq           ← fastest option (~200ms)
+      # - GROQ_API_KEY=your-key       ← set in .env, free at console.groq.com
+      # - GROQ_MODEL=llama-3.3-70b-versatile
+
+      # ── TTS ─────────────────────────────────────────────────────────────
+      # - TTS_VOICE=en-US-GuyNeural
+
+      # ── Barge-In ────────────────────────────────────────────────────────
+      - ALLOW_INTERRUPTIONS=true
 
       # ── Voice Activity Detection (VAD) ─────────────────────────────────
       # Lower threshold = more sensitive to quiet speech
@@ -57,9 +160,10 @@ services:
       - REDIS_PORT=6379
       - REDIS_REQUIRED=false
     volumes:
-      # Persist logs and debug audio to the host for inspection
+      # Persist logs, debug audio, and TTS cache to the host
       - ./logs:/app/logs
       - ./debug_audio:/app/debug_audio
+      - ./tts_cache:/app/tts_cache
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-sf", "http://127.0.0.1:8000/health" ]
@@ -67,3 +171,22 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    networks:
+      - voicebot-net
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  voicebot-net:
+    driver: bridge
+    # Allows voicebot to talk to ollama by service name (http://ollama:11434)
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  ollama_data:
+    # Model files stored here — persists across container restarts.
+    # ~400MB for qwen2.5:0.5b, ~2GB for qwen2.5:3b
+    # Only downloaded ONCE, reused forever.
