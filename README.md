@@ -55,12 +55,7 @@ The system supports **multiple concurrent calls**, with per-call audio buffering
 │   ┌─────────────┐                                        │               │
 │   │  mod_event   │◀── ESL (port 8021) ──── agent.py      │               │
 │   │  _socket     │                                       │               │
-│   └─────────────┘    Sounds dir:                         │               │
-│                      /usr/local/freeswitch/sounds/custom/ │               │
-│                      ├── english_menu.wav                 │               │
-│                      ├── thank_you.wav                    │               │
-│                      ├── sorry.wav                        │               │
-│                      └── ...                              │               │
+│   └─────────────┘                                        │               │
 └──────────────────────────────────────────────────────────┼───────────────┘
                                                            │
                                WebSocket ws://host:8000/media
@@ -83,15 +78,22 @@ The system supports **multiple concurrent calls**, with per-call audio buffering
 │   │  ┌──────────────────────────────────────────────────────┘       │    │
 │   │  │                                                               │    │
 │   │  ▼                                                               │    │
-│   │  ┌──────────┐   ┌─────────────┐   ┌───────────────────────┐    │    │
-│   │  │ STT API  │──▶│ Flow Engine │──▶│ Response Handler      │    │    │
-│   │  │ (Whisper)│   │ (JSON IVR)  │   │ (uuid_broadcast via   │    │    │
-│   │  │ HTTP POST│   │ fuzzy+semantic│  │  fs_cli)              │    │    │
-│   │  └──────────┘   └─────────────┘   └───────────────────────┘    │    │
+│   │  ┌──────────┐   ┌─────────────┐   ┌──────────────┐   ┌──────────┐  │    │
+│   │  │ STT API  │──▶│ LLM Agent   │──▶│ Sentence     │──▶│ TTS      │  │    │
+│   │  │ (Whisper)│   │ (Gemini/    │   │ Queue        │   │ Synthes- │  │    │
+│   │  │ HTTP POST│   │ Groq/Ollama)│   │ (Streaming)  │   │ izer     │  │    │
+│   │  └──────────┘   └─────────────┘   └──────────────┘   └─────┬────┘  │    │
+│   │                                                            │       │    │
+│   │                                                            ▼       │    │
+│   │                                                   ┌──────────────┐ │    │
+│   │                                                   │ Response     │ │    │
+│   │                                                   │ Handler      │ │    │
+│   │                                                   │ (fs_cli)     │ │    │
+│   │                                                   └──────────────┘ │    │
 │   └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
 │   ┌────────────┐                                                         │
-│   │   Redis    │  (session state, locks, flow_state per call)            │
+│   │   Redis    │  (session state, locks, conversation history, TTS cache)│
 │   └────────────┘                                                         │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -106,7 +108,7 @@ This is the exact sequence of events when a phone call comes in:
 
 1. **SIP Phone** sends a SIP `INVITE` to FreeSWITCH on port `5060/udp`.
 2. **FreeSWITCH** (running inside Docker) receives the call via `mod_sofia` (the SIP stack built on top of `sofia-sip`).
-3. The FreeSWITCH **dialplan** (XML configuration in `conf/dialplan/`) routes the call. The default dialplan parks the call, triggering a `CHANNEL_PARK` event.
+3. The FreeSWITCH **dialplan** (XML configuration in `conf/dialplan/`) routes the call. Call is immediately picked up (instant connection, no 10-second delay).
 
 ### Phase 2: Agent Picks Up
 
@@ -114,7 +116,7 @@ This is the exact sequence of events when a phone call comes in:
 5. When `agent.py` receives the `CHANNEL_PARK` event, it:
    - **Answers the call**: `api uuid_answer <uuid>`
    - **Forks the audio** to the Python WebSocket server: `api uuid_audio_fork <uuid> start ws://127.0.0.1:8000/media mono 16k`
-   - **Plays a welcome message**: `api uuid_broadcast <uuid> <welcome.wav>`
+   - Plays a greeting synthesized by TTS: `Hello! Welcome to Unified Reach Fiber. How can I help you today?`
 
 ### Phase 3: Audio Streaming
 
@@ -127,46 +129,49 @@ This is the exact sequence of events when a phone call comes in:
 For each 32ms audio chunk received:
 
 9. **VAD Detection** (Silero VAD, per-call instance via `PerCallVADManager`):
-   - Determines if the chunk contains speech (probability > 0.3 threshold).
-   - Tracks speech start/end transitions based on minimum speech duration (200ms) and minimum silence duration (1500ms).
+   - Determines if the chunk contains speech (probability > 0.5 threshold).
+   - Tracks speech start/end transitions based on minimum speech duration (200ms) and conversational silence duration (800ms).
 
 10. **Audio Buffering** (per-call `AudioBuffer`):
     - During speech: accumulates raw PCM chunks.
     - On `speech_end` event: releases the complete utterance as a single byte blob.
-    - Safety: enforces minimum length (18KB ≈ 0.56s) and maximum length (320KB ≈ 10s).
+    - Safety: enforces minimum length (18KB ≈ 0.3s) and maximum length (320KB ≈ 10s).
     - Timeout: forces release after 10 seconds even without speech_end.
 
 11. When a complete utterance is ready, it's sent to a **ThreadPoolExecutor** for processing:
 
 ### Phase 5: Utterance Processing (in thread pool)
 
-12. **Noise Cancellation** (DeepFilterNet2, `ImprovedNoiseCanceller`):
+12. **Noise Cancellation** (DeepFilterNet2, `ImprovedNoiseCanceller` - if enabled):
     - Resamples to DeepFilter's native sample rate (48kHz).
     - Runs the full utterance through the neural network.
     - Normalizes output with configurable gain (4x by default).
     - Resamples back to 16kHz for STT.
 
 13. **Speech-to-Text** (`STTHandler`):
-    - HTTP POST to external Whisper API at `http://164.52.203.140:8890/transcribe`.
-    - Sends raw PCM bytes with parameters: `sample_rate=16000, bit_depth=int16, language=en`.
-    - Receives JSON response: `{"text": "I want to check my payment"}`.
+    - HTTP POST to external Whisper API (or local `faster-whisper` model if configured).
+    - Sends raw PCM bytes.
+    - Receives transcribed text.
 
-14. **IVR Flow Engine** (`FlowEngine`):
-    - Loads the current call's flow state from Redis (which step the caller is on).
-    - Matches the transcribed text against the current step's choices using a hybrid strategy:
-      - **Pass 1 — Fuzzy matching** (`fuzzywuzzy`): Fast string similarity (< 5ms). Includes built-in synonym expansion for yes/no variants.
-      - **Pass 2 — Semantic matching** (`sentence-transformers`): Cosine similarity with `all-MiniLM-L6-v2` embeddings. Catches paraphrases that keywords miss.
-    - Determines the next step in the JSON flow tree.
-    - Returns: `(prompt_text, audio_filename, should_end, is_fallback)`.
+14. **Conversational LLM Agent** (`BaseLLMProvider` / `FallbackLLM`):
+    - Passes the text + conversation history to the primary LLM provider (Gemini).
+    - If Gemini fails (e.g. rate limit, daily quota limit), it automatically switches to the fallback provider (Groq or Ollama).
+    - A background health check loop periodically pings Gemini to test its recovery, restoring Gemini as primary once available.
+    - Streams tokens from the LLM and parses them into complete sentences.
 
-15. **Response Playback** (`ResponseHandler`):
-    - Plays the matched audio file via: `fs_cli -x "uuid_broadcast <uuid> /usr/local/freeswitch/sounds/custom/<filename> aleg"`
-    - Sets a speaking lock (prevents processing user audio while bot is talking).
-    - Gets audio duration via `ffprobe` and releases the lock after playback completes.
+15. **Sentence-Level TTS Synthesis** (`TTSSynthesizer`):
+    - Submits sentences in real-time to a thread pool for synthesis via `edge-tts`.
+    - MP3 data returned from Edge-TTS is converted to 16kHz mono WAV using `ffmpeg` (taking ~50ms) with a fallback to `torchaudio`.
+    - Synthesized phrases are cached in Redis and local disk to avoid synthesis latency on repeat prompts.
+
+16. **Response Playback & Queueing** (`ResponseHandler`):
+    - Plays synthesized WAV files sequentially using `fs_cli uuid_broadcast`.
+    - Enforces a speaking lock to prevent processing user audio while bot is speaking.
+    - **Barge-In (User Interruption)**: If the user interrupts, the VAD detects speech, sends a `uuid_break <uuid> all` command to stop the bot playback, cancels pending TTS syntheses, and starts processing the new speech immediately.
 
 ### Phase 6: Call End
 
-16. When the WebSocket disconnects (caller hangs up):
+17. When the WebSocket disconnects (caller hangs up):
     - Session lock is released in Redis.
     - Session is ended in Redis.
     - Per-call VAD instance is removed from `PerCallVADManager`.
@@ -185,11 +190,12 @@ For each 32ms audio chunk received:
 | **Noise Canceller** | `audio_pipeline/improved_noise_canceller.py` | DeepFilterNet2 wrapper for full-utterance denoising |
 | **VAD Manager** | `audio_pipeline/vad_detector.py` | Silero VAD with per-call state isolation (`PerCallVADManager`) |
 | **Audio Buffer** | `audio_pipeline/audio_buffer.py` | Per-call audio accumulation with speech boundary detection |
-| **Flow Engine** | `ivr/json_flow_engine.py` | JSON-driven IVR navigation with hybrid fuzzy+semantic matching |
-| **Response Handler** | `ivr/response_handler.py` | Audio playback via `fs_cli uuid_broadcast` |
-| **Intent Matcher** | `ivr/intent_matcher.py` | Hybrid fuzzy + semantic intent matching engine |
-| **STT Handler** | `stt_handler.py` | HTTP client for Whisper STT API |
-| **Session Manager** | `session_manager.py` | Redis-backed session state and locking |
+| **LLM Agent** | `ivr/llm_agent.py` | Conversational LLM wrapper supporting Gemini, Groq, and Ollama with fallbacks |
+| **TTS Synthesizer** | `audio_pipeline/tts_synthesizer.py` | Edge-TTS synthesizer with ffmpeg MP3→WAV converter and Redis cache |
+| **Response Handler** | `ivr/response_handler.py` | Playback queue, locks, and barge-in (interruption) controller |
+| **Latency Tracker** | `latency_tracker.py` | Tracks phase durations (NC, STT, LLM, TTS, RTT) per turn |
+| **STT Handler** | `stt_handler.py` | Switchable client for remote Whisper API or local Faster-Whisper |
+| **Session Manager** | `session_manager.py` | Redis-backed session state, history storage, and locking |
 
 ---
 
@@ -258,69 +264,30 @@ This is a **multi-stage Docker build** (the Dockerfile for this base image is ma
 
 ---
 
-## IVR Flow Engine
+## Conversational LLM Engine
 
-The IVR flow is defined in JSON files under `ivr/flows/`. Each language has its own file (e.g., `en.json`).
+Rather than a static, JSON-defined flow tree, the VoiceBot uses a multi-provider Conversational LLM Agent to handle user requests dynamically. The LLM acts as an interactive customer service assistant, guided by a system instruction prompt.
 
-### Flow Structure
+### Supported Providers
 
-```json
-{
-  "start": "en_flow_start",
-  "steps": {
-    "en_flow_start": {
-      "prompt": "Your preferred language is english. Say 'yes' or 'no'",
-      "audio": "en_flow_start.wav",
-      "type": "choice",
-      "choices": {
-        "yes": "english_menu",
-        "no": "language_select"
-      }
-    },
-    "english_menu": {
-      "prompt": "We offer the following services...",
-      "audio": "english_menu.wav",
-      "type": "choice",
-      "choices": {
-        "subscribe": "subscribe_fiber",
-        "billing": "billing_info",
-        "payment": "payment_options",
-        ...
-      }
-    }
-  }
-}
-```
+- **Google Gemini** (`gemini-2.0-flash`): Primary cloud provider, offering rapid response times (~350ms for first sentence) and high quality.
+- **Groq** (`llama-3.3-70b-versatile`): High-speed OpenAI-compatible cloud inference provider, yielding responses in 200–400ms.
+- **Ollama** (`qwen2.5:0.5b` or custom models): Runs locally inside or alongside the container for fully offline, cost-free execution.
 
-### Step Types
+### Resilience and Automatic Fallback
 
-| Type | Behavior |
-|---|---|
-| `choice` | Matches user speech against `choices` keys using fuzzy + semantic matching. On match, transitions to the mapped next step. |
-| `input` | Accepts any speech (e.g., account number) and moves to `next`. |
-| `action` | Has an `action` field (e.g., `transfer_agent`, `send_sms`). Currently stubbed — logs the action and moves to `next`. |
-| `end` | Terminal step. Indicates the call flow is complete. |
-| (auto-advance) | No `type` but has `next` — automatically transitions on any input. |
+To prevent call failures due to rate limits or API quota exhaustion:
+1. **Fallback Chain**: If Gemini fails (such as returning a `429 Resource Exhausted` error), the agent automatically shifts to Groq (if `GROQ_API_KEY` is provided) or local Ollama.
+2. **Background Health Checks**: Rather than testing connections on incoming calls, the server runs a background health check loop.
+   - Pings the primary Gemini API every 60 seconds (or every 30 minutes if the daily quota is exhausted) to determine if it has recovered.
+   - Automatically switches back to Gemini when healthy, preserving cloud quota and avoiding connection latency during active calls.
 
-### Matching Strategy (Hybrid)
+### Conversational Guidelines
 
-```
-User says: "I want to pay my bill"
-
-Pass 1 — Fuzzy (fuzzywuzzy):
-  Compares against choice keys: ["subscribe", "billing", "payment", ...]
-  "payment" → score 70 (below threshold 75) → MISS
-
-Pass 2 — Semantic (sentence-transformers):
-  Encodes "I want to pay my bill" with all-MiniLM-L6-v2
-  Compares cosine similarity vs each choice key embedding
-  "payment" → similarity 0.62 (above threshold 0.45) → HIT ✓
-
-Result: Navigate to "payment_options" step, play payment_options.wav
-```
-
-> [!NOTE]
-> Semantic matching (Pass 2) is **disabled by default** to keep the image lightweight. Only fuzzy matching runs out of the box. To enable it, set `USE_SEMANTIC_MATCHING = True` in `config.py` (requires `sentence-transformers` to be installed).
+The agent is instructed to follow specific telephony guidelines via the system prompt:
+- **Conciseness**: Restricts responses to 1-3 sentences suitable for spoken conversations.
+- **Format Filtering**: Strips markdown, bullet points, asterisks, URLs, and code formatting to produce clean text suitable for TTS playback.
+- **Warm Tone**: Pre-configured as a professional support representative for "Unified Reach Fiber" helping with speed issues, billing, plan options, and outages.
 
 ---
 
@@ -341,7 +308,7 @@ Raw 32ms chunk (1024 bytes @ 16kHz/16-bit/mono)
 │  AudioBuffer (per-call)                  │
 │  Accumulates during speech, releases     │
 │  complete utterance on speech_end        │
-│  Min: 18KB (~0.56s) Max: 320KB (~10s)   │
+│  Min: 18KB (~0.3s) Max: 320KB (~10s)    │
 └────────────────┬────────────────────────┘
                  │ Complete utterance (bytes)
                  ▼
@@ -354,22 +321,29 @@ Raw 32ms chunk (1024 bytes @ 16kHz/16-bit/mono)
                  │ Clean audio
                  ▼
 ┌─────────────────────────────────────────┐
-│  STT (HTTP POST to Whisper API)         │
+│  STT (HTTP POST or local Whisper)       │
 │  Returns transcribed text               │
 └────────────────┬────────────────────────┘
                  │ "I want to check payment"
                  ▼
 ┌─────────────────────────────────────────┐
-│  FlowEngine.process_input()             │
-│  Fuzzy match → Semantic fallback        │
-│  Returns (text, audio_file, end, retry) │
+│  Conversational LLM (Gemini/Groq/Ollama)│
+│  Generates token stream in real-time,   │
+│  splits tokens into full sentences      │
 └────────────────┬────────────────────────┘
-                 │ ("payment_options.wav")
+                 │ Sentence 1, Sentence 2...
                  ▼
 ┌─────────────────────────────────────────┐
-│  ResponseHandler.play_audio()           │
+│  TTS (Edge-TTS Synthesizer)             │
+│  Converts text to WAV (ffmpeg/torchaudio)│
+│  Caches results in Redis/disk           │
+└────────────────┬────────────────────────┘
+                 │ WAV file path
+                 ▼
+┌─────────────────────────────────────────┐
+│  ResponseHandler (Playback Queue)       │
 │  fs_cli → uuid_broadcast → FreeSWITCH  │
-│  → Caller hears the response audio      │
+│  Handles barge-in (interruption)        │
 └─────────────────────────────────────────┘
 ```
 
@@ -581,7 +555,16 @@ All settings are in `config.py`. Key settings support environment variable overr
 | `FREESWITCH_HOST` | `FREESWITCH_HOST` | `127.0.0.1` | FreeSWITCH ESL host |
 | `FREESWITCH_PORT` | `FREESWITCH_PORT` | `8021` | FreeSWITCH ESL port |
 | `WS_PORT` | `WS_PORT` | `8000` | WebSocket server port |
-| `STT_URL` | `STT_URL` | `http://164.52.203.140:8890/transcribe` | STT API endpoint |
+| `STT_PROVIDER` | `STT_PROVIDER` | `remote` | `remote` (HTTP API) or `local` (Faster-Whisper) |
+| `STT_URL` | `STT_URL` | `http://164.52.203.140:8890/transcribe` | STT API endpoint (when `remote`) |
+| `LLM_PROVIDER` | `LLM_PROVIDER` | `gemini` | `gemini`, `groq`, or `ollama` |
+| `GEMINI_API_KEY` | `GEMINI_API_KEY` | (empty) | API key for Gemini |
+| `GEMINI_MODEL` | `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model name |
+| `GROQ_API_KEY` | `GROQ_API_KEY` | (empty) | API key for Groq |
+| `GROQ_MODEL` | `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model name |
+| `OLLAMA_URL` | `OLLAMA_URL` | `http://host.docker.internal:11434` | Ollama API endpoint |
+| `OLLAMA_MODEL` | `OLLAMA_MODEL` | `qwen2.5:0.5b` | Ollama model name |
+| `TTS_VOICE` | `TTS_VOICE` | `en-US-GuyNeural` | Edge-TTS voice identifier |
 | `REDIS_HOST` | `REDIS_HOST` | `127.0.0.1` | Redis host |
 | `MAX_CONCURRENT_CALLS` | `MAX_CONCURRENT_CALLS` | `5` | Max simultaneous calls |
 | `DF_USE_GPU` | `DF_USE_GPU` | `False` | Enable CUDA for DeepFilterNet |
@@ -591,12 +574,11 @@ All settings are in `config.py`. Key settings support environment variable overr
 
 | Setting | Default | Description |
 |---|---|---|
-| `VAD_THRESHOLD` | `0.3` | Speech probability threshold (lower = more sensitive) |
-| `VAD_MIN_SILENCE_DURATION_MS` | `1500` | How long to wait after speech stops before processing |
+| `VAD_THRESHOLD` | `0.5` | Speech probability threshold (lower = more sensitive, higher = filters noise) |
+| `VAD_MIN_SILENCE_DURATION_MS` | `800` | How long to wait after speech stops before processing (800ms is conversational) |
 | `DF_GAIN` | `4.0` | Post-NC volume normalization gain |
 | `DF_ATTENUATION_LIMIT` | `6.0` | Max noise reduction in dB |
-| `FUZZY_MATCH_THRESHOLD` | `75` | Minimum fuzzywuzzy score to accept a match |
-| `SEMANTIC_MATCH_THRESHOLD` | `0.45` | Minimum cosine similarity for semantic matching |
+| `ALLOW_INTERRUPTIONS` | `true` | Enable user barge-in during bot playback |
 
 ---
 
@@ -616,8 +598,8 @@ The server couldn't query FreeSWITCH for active channels. Check:
 
 ### VAD never detects speech end
 
-- Lower `VAD_MIN_SILENCE_DURATION_MS` (default 1500ms may be too long for fast speakers).
-- Lower `VAD_THRESHOLD` (default 0.3).
+- Lower `VAD_MIN_SILENCE_DURATION_MS` (default 800ms may be too long for fast speakers).
+- Raise `VAD_THRESHOLD` (default 0.5) to filter out background noise causing false speech detection.
 
 ### "mod_audio_fork" not loaded
 

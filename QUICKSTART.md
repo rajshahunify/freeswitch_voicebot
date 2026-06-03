@@ -84,27 +84,43 @@ docker compose logs -f
 
 ### What You Should See in the Logs:
 ```text
-freeswitch-voicebot  | 2026-05-22 12:00:00 - __main__ - INFO - 📞 NEW CALL STARTING
-freeswitch-voicebot  | 2026-05-22 12:00:02 - audio_pipeline.vad_detector - INFO - 🎤 Speech START (prob: 0.94)
-freeswitch-voicebot  | 2026-05-22 12:00:05 - audio_pipeline.vad_detector - INFO - 🎤 Speech END (silence detected)
-freeswitch-voicebot  | 2026-05-22 12:00:06 - stt_handler - INFO - 🎯 STT: 'hello' (Duration: 320ms)
-freeswitch-voicebot  | 2026-05-22 12:00:06 - ivr.json_flow_engine - INFO - 🎯 Match: 'hello' -> Playing 'english_menu.wav'
+freeswitch-voicebot  | 2026-06-03 12:00:00 - __main__ - INFO - 📞 NEW CALL STARTING
+freeswitch-voicebot  | 2026-06-03 12:00:02 - audio_pipeline.vad_detector - INFO - 🎤 Speech START (prob: 0.94)
+freeswitch-voicebot  | 2026-06-03 12:00:05 - audio_pipeline.vad_detector - INFO - 🎤 Speech END (speech=120, silence=805)
+freeswitch-voicebot  | 2026-06-03 12:00:05 - event_emitter - INFO - [Transcription] User: 'hello' | Provider: remote | Latency: 320ms
+freeswitch-voicebot  | 2026-06-03 12:00:06 - ivr.llm_agent - INFO - 🤖 LLM [gemini] first sentence in 350ms
+freeswitch-voicebot  | 2026-06-03 12:00:06 - event_emitter - INFO - [BotResponse] Bot: 'Hello! How can I help you today?' | Provider: gemini | Latency: 420ms
 ```
 
 ---
 
 ## ⚙️ Step 5: Customize Settings
 
-All settings are configurable via environment variables in the compose file — no code changes needed:
+All settings are configurable via environment variables in the compose file or the `.env` file — no code changes needed:
 
 ```yaml
 environment:
   - VOICEBOT_EXTENSION=5000           # Dial extension for the voicebot
   - EXTERNAL_IP=127.0.0.1            # NAT IP for SDP (set to server IP for remote access)
-  - STT_URL=http://your-stt/transcribe  # Your STT API endpoint
-  - NC_ENABLED=true                   # Enable DeepFilterNet2 noise cancellation
-  - MAX_CONCURRENT_CALLS=10          # Max simultaneous calls
-  - LOG_LEVEL=DEBUG                   # Logging verbosity
+  - NC_ENABLED=false                  # Neural noise cancellation (CPU-intensive)
+  - MAX_CONCURRENT_CALLS=5           # Max simultaneous calls
+  - LOG_LEVEL=INFO                   # Logging verbosity
+  
+  # --- AI Pipeline Providers ---
+  - STT_PROVIDER=remote              # "remote" (external API) or "local" (Faster-Whisper)
+  - STT_URL=http://your-stt/transcribe
+  
+  - LLM_PROVIDER=gemini              # "gemini", "groq", or "ollama"
+  - GEMINI_API_KEY=your-key          # Set in .env
+  - GEMINI_MODEL=gemini-2.0-flash
+  
+  - GROQ_API_KEY=your-key            # Set in .env (for fallback or primary Groq)
+  - GROQ_MODEL=llama-3.3-70b-versatile
+  
+  - OLLAMA_URL=http://host.docker.internal:11434
+  - OLLAMA_MODEL=qwen2.5:0.5b
+  
+  - TTS_VOICE=en-US-AvaMultilingualNeural
 ```
 
 After changing compose settings:

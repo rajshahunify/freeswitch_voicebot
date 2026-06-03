@@ -2,6 +2,25 @@
 
 All notable changes to the FreeSWITCH VoiceBot project.
 
+## [1.1.0] — 2026-06-03
+
+### 🤖 Conversational LLM Engine (Replaces Legacy IVR Flow)
+- **Multi-Provider LLM Integration**: Support for Google Gemini (`gemini-2.0-flash`), Groq (`llama-3.3-70b-versatile`), and local Ollama (`qwen2.5:0.5b` or custom models).
+- **Proactive Fallback & Health Checks**: Automatically falls back from Gemini to Groq/Ollama on API quota exhaustion or rate limits. Background loop checks availability every 60 seconds (or 30 minutes for daily limits) and reverts to Gemini when available.
+- **Concise & Voice-Optimized System Prompt**: System instructions ensure response length stays under 3 sentences with natural, conversational voice formatting (stripping Markdown, links, and code formatting).
+
+### 🗣️ Streaming & Low-Latency Text-to-Speech (TTS)
+- **Edge-TTS Synthesizer**: Uses high-quality, free Edge-TTS voices (e.g., `en-US-AvaMultilingualNeural` or `en-US-GuyNeural`) requiring no API keys.
+- **Concurrent Streaming Pipeline**: Streams tokens from LLM, aggregates them into sentences, and submits them to a thread pool for TTS synthesis in real-time.
+- **ffmpeg Conversion**: Converts MP3 to WAV format in ~50ms using `ffmpeg` subprocess with fallback to `torchaudio` if needed.
+- **Redis & Local Disk Cache**: Caches synthesized WAV files based on voice-text hashes, bypassing TTS synthesis entirely for repeat phrases.
+
+### 🛑 Real-Time Barge-In & Pipeline Optimizations
+- **Barge-In (User Interruption)**: If the user speaks during bot playback, the VAD detects speech start, interrupts playout via `uuid_break <uuid> all`, cancels any queued TTS synthesis futures, and processes the new utterance immediately.
+- **Conversational VAD Defaults**: Lowered default `VAD_MIN_SILENCE_DURATION_MS` to `800` (down from `1500`) and raised `VAD_THRESHOLD` to `0.5` (up from `0.3`) for faster speech-end detection and background noise filtering.
+- **Latency Tracker & Performance Logs**: Tracks and outputs metrics for each pipeline stage (`NC`, `STT`, `LLM`, `TTS`, `Playback RTT`). Logs actual provider used (`[groq]`, `[gemini]`, `[ollama]`) rather than static configuration variables.
+- **10s Dialplan Delay Removed**: Fixed dialplan and Docker entrypoint configurations to remove the 10-second startup ring sleep for instant call pickup.
+
 ## [1.0.0] — 2026-05-22
 
 ### 🏗️ Architecture
