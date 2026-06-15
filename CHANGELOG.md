@@ -2,6 +2,36 @@
 
 All notable changes to the FreeSWITCH VoiceBot project.
 
+## [1.2.0] — 2026-06-15
+
+### 🎯 Call Control via LLM Action Tags
+- **`[ACTION:TRANSFER_AGENT]`** and **`[ACTION:HANGUP]`**: The LLM can now trigger telephony actions (transfer to agent, hang up call) by embedding action tags in its response. Tags are automatically stripped before TTS synthesis.
+- **Scheduled hangup**: After the final audio finishes playing, the system gracefully disconnects the call.
+
+### 🔊 Live Voice Swap API
+- **`GET /voices`**: Lists popular Edge-TTS voices (US, UK, Kenyan English) and shows current voice.
+- **`POST /voice`**: Live-swap the TTS voice without restarting the server. Supports optional preview synthesis to test voices instantly.
+
+### 🖥️ GPU Server Deployment (NVIDIA H100)
+- **`docker-compose.gpu.yml`**: New compose file for GPU servers with port conflict avoidance (SIP 5062, WebSocket 8080), NVIDIA GPU passthrough, and host Ollama/Redis reuse.
+- **`.env.gpu.example`**: Sanitized environment template for GPU deployments.
+- **`scripts/check_server.sh`**: 7-step server readiness diagnostic (Docker, GPU, Ollama, ports, network, firewall).
+
+### 📝 System Prompt Customization
+- **`ivr/system_prompt.txt`**: Externalized system prompt for the LLM agent (ARIA for Unified Reach Fiber Kenya). Configurable via `LLM_SYSTEM_PROMPT_FILE` env var.
+- Includes payment methods (M-Pesa, Airtel Money), shop locations, coverage areas, and troubleshooting flows.
+
+### 🔧 Reliability Improvements
+- **WebSocket timeout**: Increased from 30s to 120s to prevent false disconnects on long calls.
+- **Call liveness check**: Replaced `show channels` polling with direct `fs_cli uuid_exists` check for reliable dead-call detection.
+- **SIP session timers disabled**: Prevents Zoiper/SIP clients from auto-disconnecting long voicebot calls due to session timer expiry.
+- **SIP port 5062**: Internal SIP profile hardcoded to 5062 for GPU server where livekit-sip occupies 5060.
+
+### 📚 Documentation
+- **`docs/docker-build-reference/`**: Standalone FreeSWITCH + mod_audio_fork Dockerfile, docker-compose, and full code audit walkthrough preserved from the build server.
+- Updated README: action tags, voice API, GPU deployment option, system prompt docs, project structure.
+- Updated `.gitignore`: blocks all `.env.*` files (except `.example`) to prevent API key leaks.
+
 ## [1.1.0] — 2026-06-03
 
 ### 🤖 Conversational LLM Engine (Replaces Legacy IVR Flow)

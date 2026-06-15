@@ -266,7 +266,7 @@ This is a **multi-stage Docker build** (the Dockerfile for this base image is ma
 
 ## Conversational LLM Engine
 
-Rather than a static, JSON-defined flow tree, the VoiceBot uses a multi-provider Conversational LLM Agent to handle user requests dynamically. The LLM acts as an interactive customer service assistant, guided by a system instruction prompt.
+Rather than a static, JSON-defined flow tree, the VoiceBot uses a multi-provider Conversational LLM Agent to handle user requests dynamically. The LLM acts as an interactive customer service assistant, guided by a customizable system instruction prompt.
 
 ### Supported Providers
 
@@ -282,12 +282,26 @@ To prevent call failures due to rate limits or API quota exhaustion:
    - Pings the primary Gemini API every 60 seconds (or every 30 minutes if the daily quota is exhausted) to determine if it has recovered.
    - Automatically switches back to Gemini when healthy, preserving cloud quota and avoiding connection latency during active calls.
 
-### Conversational Guidelines
+### System Prompt Customization
 
-The agent is instructed to follow specific telephony guidelines via the system prompt:
-- **Conciseness**: Restricts responses to 1-3 sentences suitable for spoken conversations.
-- **Format Filtering**: Strips markdown, bullet points, asterisks, URLs, and code formatting to produce clean text suitable for TTS playback.
-- **Warm Tone**: Pre-configured as a professional support representative for "Unified Reach Fiber" helping with speed issues, billing, plan options, and outages.
+The agent's behavior is driven by a **system prompt file** (`ivr/system_prompt.txt`) that defines:
+- **Persona**: The bot's identity, name, and tone (e.g., ARIA for Unified Reach Fiber Kenya).
+- **Knowledge Base**: Payment methods (M-Pesa, Airtel Money), shop locations, coverage areas, billing info.
+- **Conversational Guidelines**: 1-3 sentence responses, no markdown/formatting, natural spoken style.
+- **Action Triggers**: Instructions for when to include `[ACTION:TRANSFER_AGENT]` or `[ACTION:HANGUP]` tags.
+
+To customize for a different business, edit `ivr/system_prompt.txt` or set `LLM_SYSTEM_PROMPT_FILE` env var.
+
+### Action Tags (Call Control)
+
+The LLM can trigger telephony actions by including special tags in its response:
+
+| Tag | Effect |
+|---|---|
+| `[ACTION:TRANSFER_AGENT]` | Plays final response, then hangs up the call (transfer to human agent) |
+| `[ACTION:HANGUP]` | Plays final goodbye, then hangs up the call |
+
+Action tags are **automatically stripped** from the text before TTS synthesis — the caller never hears them. The system waits for the final audio to finish playing before executing the action.
 
 ---
 
@@ -380,6 +394,8 @@ freeswitch_voicebot/
 ├── docker-compose.yml               # Bridge networking (production)
 ├── docker-compose.dev.yml           # Local dev (volume mounts for live editing)
 ├── docker-compose.host.yml          # Linux host networking (high performance)
+├── docker-compose.gpu.yml           # GPU server deployment (NVIDIA H100)
+├── .env.gpu.example                 # GPU server env template (sanitized)
 │
 ├── config.py                        # Centralized configuration
 ├── server_multicall.py              # Main WebSocket server (FastAPI)
@@ -397,7 +413,9 @@ freeswitch_voicebot/
 │
 ├── ivr/                             # IVR logic
 │   ├── __init__.py                  # Package init
-│   ├── json_flow_engine.py          # JSON-based flow navigation
+│   ├── llm_agent.py                 # Conversational LLM (Gemini/Groq/Ollama)
+│   ├── system_prompt.txt            # System prompt for the LLM agent
+│   ├── json_flow_engine.py          # JSON-based flow navigation (legacy)
 │   ├── intent_matcher.py            # Hybrid fuzzy + semantic matching
 │   ├── response_handler.py          # Audio playback via fs_cli
 │   └── flows/                       # Flow definitions
@@ -418,9 +436,14 @@ freeswitch_voicebot/
 │   ├── WALKTHROUGH.md               # Detailed debugging history
 │   ├── UPGRADE_PLAN.md              # Future upgrade roadmap
 │   ├── PROJECT_SUMMARY.md           # Architecture summary
+│   ├── docker-build-reference/      # Standalone FreeSWITCH Docker build
+│   │   ├── Dockerfile               # Multi-stage FS + mod_audio_fork build
+│   │   ├── walkthrough.md           # Full code audit and runbook
+│   │   └── 103_docker_fs/           # Standalone FS compose
 │   └── archive/                     # Legacy bare-metal files
 │
 ├── scripts/                         # Developer utilities
+│   ├── check_server.sh              # GPU server readiness diagnostic (7-step)
 │   ├── test_components.py           # Component testing
 │   └── test_redis.py                # Redis testing
 │
@@ -448,13 +471,14 @@ freeswitch_voicebot/
 
 The entire VoiceBot system (FreeSWITCH, Redis, WebSocket Server, and ESL Agent) runs in a **single multi-service Docker container** managed by `supervisord`. All settings are configurable via environment variables in the compose file — no code changes needed.
 
-We provide **three compose configurations**:
+We provide **four compose configurations**:
 
 | File | Use Case | Networking |
 |---|---|---|
 | `docker-compose.yml` | Production / default | Bridge (works everywhere) |
 | `docker-compose.dev.yml` | Local development | Bridge + volume mounts |
 | `docker-compose.host.yml` | Linux high-performance | Host networking |
+| `docker-compose.gpu.yml` | GPU server (NVIDIA H100) | Bridge + GPU passthrough |
 
 > [!IMPORTANT]
 > **Platform Guide:** `docker-compose.yml` and `docker-compose.dev.yml` work on **all platforms** (Windows, macOS, Linux). The `docker-compose.host.yml` uses host networking and is **Linux only** — Docker Desktop on Windows/macOS does not support `network_mode: host`.
@@ -519,6 +543,32 @@ For high-concurrency production deployments on Linux, uses native **host network
 ```bash
 docker compose -f docker-compose.host.yml up -d
 ```
+
+---
+
+### Option D: GPU Server Deployment (NVIDIA H100)
+
+For shared GPU servers with port conflicts (e.g., livekit-sip on 5060, text-analytics on 8000). Remaps SIP to 5062, WebSocket to 8080, reuses host Redis.
+
+1. **Copy and configure the environment file:**
+   ```bash
+   cp .env.gpu.example .env.gpu
+   # Edit .env.gpu with your actual API keys
+   ```
+
+2. **Run the server readiness diagnostic:**
+   ```bash
+   bash scripts/check_server.sh
+   ```
+   This checks Docker, NVIDIA GPU, Ollama, port availability, network connectivity, and firewall in 7 steps.
+
+3. **Start with GPU passthrough:**
+   ```bash
+   docker compose -f docker-compose.gpu.yml up -d
+   ```
+
+> [!NOTE]
+> **Ollama:** Must be running natively on the host (not in the container) with `OLLAMA_HOST=0.0.0.0 ollama serve`. The container reaches it via `host.docker.internal`.
 
 ---
 
@@ -628,11 +678,13 @@ docker exec freeswitch-voicebot redis-cli ping
 
 ## API Endpoints
 
-The WebSocket server exposes REST endpoints for monitoring:
+The WebSocket server exposes REST endpoints for monitoring and control:
 
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Component health check |
 | `/stats` | GET | Detailed performance statistics |
 | `/sessions` | GET | List all active call sessions |
+| `/voices` | GET | List popular Edge-TTS voices and current voice |
+| `/voice` | POST | Live-swap TTS voice without restart. Body: `{"voice": "en-US-JennyNeural", "preview": true}` |
 | `/media` | WebSocket | Audio streaming endpoint (used by mod_audio_fork) |

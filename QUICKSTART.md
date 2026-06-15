@@ -30,6 +30,14 @@ Uses high-performance host networking (highly recommended for high concurrency o
 docker compose -f docker-compose.host.yml up -d
 ```
 
+### Option D: GPU Server (NVIDIA H100)
+For shared GPU servers with port conflicts. See `.env.gpu.example` for config template:
+```bash
+cp .env.gpu.example .env.gpu   # Fill in your API keys
+bash scripts/check_server.sh   # Run 7-step readiness check
+docker compose -f docker-compose.gpu.yml up -d
+```
+
 ---
 
 ## 🔍 Step 2: Verify System Health
