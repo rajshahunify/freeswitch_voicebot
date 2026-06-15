@@ -46,7 +46,7 @@ STT_PARAMS = {
 STT_TIMEOUT = 5  # seconds
 
 # Local STT (Faster-Whisper) — only loaded when STT_PROVIDER=local
-STT_LOCAL_MODEL = os.getenv("STT_LOCAL_MODEL", "small")       # tiny, base, small, medium, large-v3
+STT_LOCAL_MODEL = os.getenv("STT_LOCAL_MODEL", "large-v3") # tiny, base, small, medium, large-v3
 STT_LOCAL_DEVICE = os.getenv("STT_LOCAL_DEVICE", "cpu")        # "cpu" or "cuda"
 STT_LOCAL_COMPUTE_TYPE = os.getenv("STT_LOCAL_COMPUTE_TYPE", "int8")  # int8 for CPU, float16 for GPU
 STT_FALLBACK_ENABLED = os.getenv("STT_FALLBACK_ENABLED", "true").lower() == "true"
@@ -158,6 +158,7 @@ USE_SEMANTIC_MATCHING = False
 ALLOW_INTERRUPTIONS = os.getenv("ALLOW_INTERRUPTIONS", "true").lower() == "true"
 BOT_SPEAKING_TIMEOUT = 30  # Max seconds to hold speaking lock
 CALL_END_DISCONNECT_DELAY = 2.5  # Seconds to wait after final audio before hanging up
+TRANSFER_DESTINATION = os.getenv("TRANSFER_DESTINATION", "1001")  # Extension to transfer to when action triggered
 
 # =============================================================================
 # WEBSOCKET SERVER CONFIGURATION

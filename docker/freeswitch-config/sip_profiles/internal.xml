@@ -87,7 +87,7 @@
     <param name="context" value="public"/>
     <param name="rfc2833-pt" value="101"/>
     <!-- port to bind to for sip traffic -->
-    <param name="sip-port" value="$${internal_sip_port}"/>
+    <param name="sip-port" value="5062"/>
     <param name="dialplan" value="XML"/>
     <param name="dtmf-duration" value="2000"/>
     <param name="inbound-codec-prefs" value="$${global_codec_prefs}"/>
@@ -124,9 +124,12 @@
     <!--<param name="enable-compact-headers" value="true"/>-->
     <!--
         enable/disable session timers
+        DISABLED: Prevents Zoiper/SIP clients from auto-disconnecting calls
+        after their Session-Expires (typically 30s) when no re-INVITE is sent.
+        Our voicebot calls are long-lived (parked with audio_fork).
     -->
-    <!--<param name="enable-timer" value="false"/>-->
-    <!--<param name="minimum-session-expires" value="120"/>-->
+    <param name="enable-timer" value="false"/>
+    <param name="minimum-session-expires" value="1800"/>
     <param name="apply-inbound-acl" value="domains"/>
     <!--
         This defines your local network, by default we detect your local network

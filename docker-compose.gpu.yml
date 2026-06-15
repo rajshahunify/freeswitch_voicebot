@@ -1,0 +1,130 @@
+# =============================================================================
+# docker-compose.gpu.yml — GPU Server Deployment (10.32.28.29)
+# =============================================================================
+# For the shared GPU server where other services already occupy ports.
+# Remaps conflicting ports so voicebot coexists with existing containers.
+#
+# Port Remapping (avoiding conflicts):
+#   5060 → 5062  (livekit-sip already uses 5060)
+#   8000 → 8080  (text-analytics-api already uses 8000)
+#   6379 → reuses existing Redis on host
+#
+# Usage:
+#   docker compose -f docker-compose.gpu.yml up -d
+#   docker compose -f docker-compose.gpu.yml logs -f
+#
+# With Ollama (run on host first: CUDA_VISIBLE_DEVICES=1 ollama serve):
+#   docker compose -f docker-compose.gpu.yml up -d
+# =============================================================================
+
+services:
+  voicebot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: freeswitch-voicebot
+    # -----------------------------------------------------------------------
+    # GPU ACCESS — gives the container access to NVIDIA GPUs.
+    # Needed for: DF_USE_GPU=true (noise cancellation), STT_LOCAL_DEVICE=cuda
+    # Not needed for Ollama (runs natively on host, not in this container).
+    # Set count to 1 to limit to a single GPU, or "all" for all GPUs.
+    # -----------------------------------------------------------------------
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all # Use 1 GPU (change to "all" for all GPUs)
+              capabilities: [ gpu ]
+    env_file:
+      - .env.gpu
+    # -----------------------------------------------------------------------
+    # PORT REMAPPING — avoids conflicts with existing server containers:
+    #   livekit-sip → 5060, text-analytics → 8000, redis → 6379
+    # Inside the container, FreeSWITCH still uses 5060/8000 internally.
+    # Only the HOST-side mapping changes.
+    # -----------------------------------------------------------------------
+    ports:
+      - "5062:5062/udp" # SIP signaling
+      - "5062:5062/tcp"
+      - "5082:5080/udp" # SIP outbound
+      - "5082:5080/tcp"
+      - "8080:8000/tcp" # WebSocket (host 8080 → container 8000)
+      - "8021:8021/tcp" # ESL (free on server)
+      - "40000-40010:40000-40010/udp" # RTP media (shifted to avoid conflicts)
+    environment:
+      # ── FreeSWITCH / SIP Settings ─────────────────────────────────────
+      # EXTERNAL_IP must be the server's LAN IP for SIP clients to reach it
+      - EXTERNAL_IP=10.32.28.29
+      - VOICEBOT_EXTENSION=5000
+      # Inside the container, everything talks over localhost
+      - FREESWITCH_HOST=127.0.0.1
+      - FREESWITCH_PORT=8021
+      - FREESWITCH_PASSWORD=ClueCon
+      # WebSocket: internal to container, stays on 8000
+      - WEBSOCKET_URL=ws://127.0.0.1:8000/media
+
+      # ── RTP Ports (shifted to avoid conflicts with other services) ────
+      - RTP_START_PORT=40000
+      - RTP_END_PORT=40010
+
+      # ── LLM — Ollama running natively on the host ────────────────────
+      # host.docker.internal resolves to the Docker host IP (added via extra_hosts)
+      - LLM_PROVIDER=ollama
+      - OLLAMA_URL=http://host.docker.internal:11434
+
+      # ── Noise Cancellation (GPU-accelerated with H100) ─────────────────
+      - NC_ENABLED=false
+      - DF_USE_GPU=false
+
+      # ── Server Settings ────────────────────────────────────────────────
+      - WS_PORT=8000
+      - LOG_LEVEL=INFO
+      - MAX_CONCURRENT_CALLS=10
+
+      # ── Redis — reuse the existing Redis running on the host ───────────
+      # The server already has redis on 6379 (livekit-server-redis-node-1)
+      # We connect to it via the host gateway instead of starting our own
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=6379
+      - REDIS_REQUIRED=false
+
+      # ── Barge-In ────────────────────────────────────────────────────────
+      - ALLOW_INTERRUPTIONS=true
+
+      # ── STT Fallback ─────────────────────────────────────────────────
+      # Fall back to local Whisper immediately on first remote STT failure
+      - STT_FALLBACK_THRESHOLD=1
+
+      # ── STT Local (GPU-accelerated Faster-Whisper) ───────────────────
+      - STT_LOCAL_DEVICE=cuda
+      - STT_LOCAL_COMPUTE_TYPE=float16
+    volumes:
+      # ── Persist runtime data ──────────────────────────────────────────
+      - ./logs:/app/logs
+      - ./debug_audio:/app/debug_audio
+      - ./tts_cache:/app/tts_cache
+      # ── Live-mount source code (scp + restart, no rebuild needed) ────
+      - ./server_multicall.py:/app/server_multicall.py
+      - ./config.py:/app/config.py
+      - ./agent.py:/app/agent.py
+      - ./stt_handler.py:/app/stt_handler.py
+      - ./session_manager.py:/app/session_manager.py
+      - ./latency_tracker.py:/app/latency_tracker.py
+      - ./event_emitter.py:/app/event_emitter.py
+      - ./ivr:/app/ivr
+      - ./audio_pipeline:/app/audio_pipeline
+      # ── Live-mount FreeSWITCH configs (no rebuild for SIP changes) ───
+      - ./docker/freeswitch-config/sip_profiles/internal.xml:/usr/local/freeswitch/conf/sip_profiles/internal.xml
+      - ./docker/freeswitch-config/dialplan/default/01_voicebot.xml:/usr/local/freeswitch/conf/dialplan/default/01_voicebot.xml
+      - ./entrypoint.sh:/entrypoint.sh
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-sf", "http://127.0.0.1:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Allow container to reach host services (Ollama, Redis) via hostname
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

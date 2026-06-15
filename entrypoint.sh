@@ -82,5 +82,17 @@ echo "============================================================"
 echo "  ✓ Configuration complete. Starting supervisord..."
 echo "============================================================"
 
+# ---- 4. Patch RTP port range (when remapped to avoid host conflicts) --------
+RTP_START_PORT="${RTP_START_PORT:-}"
+RTP_END_PORT="${RTP_END_PORT:-}"
+if [ -n "${RTP_START_PORT}" ] && [ -n "${RTP_END_PORT}" ]; then
+    echo ">>> Patching RTP port range to ${RTP_START_PORT}-${RTP_END_PORT}"
+    SWITCH_CONF="${FS_CONF}/autoload_configs/switch.conf.xml"
+    if [ -f "${SWITCH_CONF}" ]; then
+        safe_sed "s|\(rtp-start-port\" value=\"\)[0-9]*|\1${RTP_START_PORT}|g" "${SWITCH_CONF}"
+        safe_sed "s|\(rtp-end-port\" value=\"\)[0-9]*|\1${RTP_END_PORT}|g" "${SWITCH_CONF}"
+    fi
+fi
+
 # ---- Hand off to supervisord ------------------------------------------------
 exec /usr/bin/supervisord -n -c /etc/supervisor/supervisord.conf

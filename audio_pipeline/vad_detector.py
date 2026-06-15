@@ -71,14 +71,30 @@ class VADDetector:
         
         start_time = time.time()
         
+        import os
+        
         try:
-            # Load Silero VAD from torch hub
-            self.model, utils = torch.hub.load(
-                repo_or_dir='snakers4/silero-vad',
-                model='silero_vad',
-                force_reload=False,
-                onnx=False
-            )
+            # Load Silero VAD — prefer local cache (no network hit)
+            hub_dir = torch.hub.get_dir()
+            local_dir = os.path.join(hub_dir, 'snakers4_silero-vad_master')
+            
+            if os.path.exists(local_dir):
+                logger.info(f"Loading Silero VAD from local cache: {local_dir}")
+                self.model, utils = torch.hub.load(
+                    repo_or_dir=local_dir,
+                    model='silero_vad',
+                    source='local',
+                    onnx=False
+                )
+            else:
+                # Cache miss — download from GitHub
+                logger.info(f"VAD cache directory {local_dir} not found, downloading from GitHub...")
+                self.model, utils = torch.hub.load(
+                    repo_or_dir='snakers4/silero-vad',
+                    model='silero_vad',
+                    trust_repo=True,
+                    onnx=False
+                )
             
             # Get utilities
             (get_speech_timestamps,

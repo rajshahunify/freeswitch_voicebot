@@ -334,6 +334,7 @@ def _schedule_call_hangup(call_uuid: str, audio_file: str = None):
         logger.error(f"[{call_uuid}] ❌ Failed to disconnect call: {e}")
 
 
+
 def process_audio_segment(audio_data: bytes, call_uuid: str):
     """
     Process complete audio segment through the full AI pipeline.
@@ -419,6 +420,7 @@ def process_audio_segment(audio_data: bytes, call_uuid: str):
         from concurrent.futures import ThreadPoolExecutor as TtsPool
         pending_futures: list = []  # List of Future objects
         first_audio_played = False
+        last_wav_path = None
         
         # 2 threads: one synthesizing, one ready
         try:
@@ -434,9 +436,14 @@ def process_audio_segment(audio_data: bytes, call_uuid: str):
                                 first_sentence = False
                             
                             full_response += sentence + " "
-                            # Submit TTS to thread pool immediately (non-blocking)
-                            future = tts_pool.submit(tts_synthesizer.synthesize, sentence)
-                            pending_futures.append(future)
+                            
+                            # Strip out action tags before sending to TTS
+                            import re as _re
+                            clean_sentence = _re.sub(r'\[ACTION:[^\]]+\]', '', sentence).strip()
+                            if clean_sentence:
+                                # Submit TTS to thread pool immediately (non-blocking)
+                                future = tts_pool.submit(tts_synthesizer.synthesize, clean_sentence)
+                                pending_futures.append(future)
                     except queue.Empty:
                         pass
                     
@@ -449,6 +456,7 @@ def process_audio_segment(audio_data: bytes, call_uuid: str):
                                 tracker.mark_first_audio_sent()
                                 response_handler.play_audio_queued(call_uuid, wav_path)
                                 first_audio_played = True
+                                last_wav_path = wav_path
                         except Exception as e:
                             logger.warning(f"[{call_uuid}] TTS future error: {e}")
                     
@@ -475,6 +483,30 @@ def process_audio_segment(audio_data: bytes, call_uuid: str):
         tracker.stop("tts")
         
         full_response = full_response.strip()
+        
+        # Detect and handle action triggers from LLM response
+        trigger_transfer = False
+        trigger_hangup = False
+        
+        if "[ACTION:TRANSFER_AGENT]" in full_response:
+            full_response = full_response.replace("[ACTION:TRANSFER_AGENT]", "").strip()
+            trigger_transfer = True
+            logger.info(f"[{call_uuid}] 🎯 Action detected: TRANSFER_AGENT")
+            
+        if "[ACTION:HANGUP]" in full_response:
+            full_response = full_response.replace("[ACTION:HANGUP]", "").strip()
+            trigger_hangup = True
+            logger.info(f"[{call_uuid}] 🎯 Action detected: HANGUP")
+        
+        # Execute triggered actions
+        audio_file = os.path.basename(last_wav_path) if last_wav_path else None
+        
+        if trigger_transfer or trigger_hangup:
+            threading.Thread(
+                target=_schedule_call_hangup,
+                args=(call_uuid, audio_file),
+                daemon=True
+            ).start()
         
         # Emit bot response event (use actual provider, not config default)
         actual_provider = config.LLM_PROVIDER
@@ -610,17 +642,29 @@ async def websocket_endpoint(websocket: WebSocket):
         
         while True:
             try:
-                # Add timeout to prevent hanging
-                message = await asyncio.wait_for(websocket.receive(), timeout=30.0)
+                # Add timeout to prevent hanging (120s — generous to avoid false disconnects)
+                message = await asyncio.wait_for(websocket.receive(), timeout=120.0)
                 last_activity_time = time.time()
                 
             except asyncio.TimeoutError:
-                # Check if call is still active
-                current_uuid = await get_active_call_uuid(retries=1)
-                if current_uuid != call_uuid:
-                    logger.info(f"[{call_uuid}] ⚠️  Call ended, closing WebSocket")
+                # 120s with no audio data is very likely a dead call
+                elapsed_idle = time.time() - last_activity_time
+                logger.warning(f"[{call_uuid}] ⚠️  No audio data for {elapsed_idle:.0f}s — checking if call is still alive")
+                
+                # Check if call is still active via FreeSWITCH
+                try:
+                    result = subprocess.run(
+                        ["fs_cli", "-x", f"uuid_exists {call_uuid}"],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    call_alive = "true" in result.stdout.strip().lower()
+                except Exception:
+                    call_alive = True  # Assume alive if we can't check (fs_cli timeout)
+                
+                if not call_alive:
+                    logger.info(f"[{call_uuid}] ⚠️  Call no longer exists in FreeSWITCH — closing WebSocket")
                     break
-                logger.debug(f"[{call_uuid}] WebSocket timeout but call still active")
+                logger.debug(f"[{call_uuid}] WebSocket timeout but call still active — continuing")
                 continue
                 
             # Handle disconnection
@@ -853,7 +897,82 @@ async def list_sessions():
 
 
 # =============================================================================
-# MAIN
+# VOICE TESTING ENDPOINTS — change TTS voice without restart
+# =============================================================================
+
+@app.get("/voices")
+async def list_voices():
+    """
+    List popular Edge-TTS voices for testing.
+    Full list: run `edge-tts --list-voices` inside the container.
+    """
+    return {
+        "current_voice": tts_synthesizer.voice,
+        "popular_voices": {
+            "en-US": [
+                "en-US-AvaMultilingualNeural",     # Female, natural, multilingual
+                "en-US-AndrewMultilingualNeural",  # Male, natural, multilingual
+                "en-US-JennyNeural",               # Female, customer service
+                "en-US-GuyNeural",                 # Male, customer service
+                "en-US-AriaNeural",                # Female, expressive
+                "en-US-DavisNeural",               # Male, casual
+            ],
+            "en-GB": [
+                "en-GB-SoniaNeural",               # Female, British
+                "en-GB-RyanNeural",                # Male, British
+                "en-GB-LibbyNeural",               # Female, British
+            ],
+            "en-KE": [
+                "en-KE-AsiliaNeural",              # Female, Kenyan English
+                "en-KE-ChilembaNeural",            # Male, Kenyan English
+            ],
+        },
+        "tip": "POST /voice with {\"voice\": \"<name>\", \"preview\": true} to test a voice"
+    }
+
+
+@app.post("/voice")
+async def set_voice(request: dict):
+    """
+    Live-swap the TTS voice without restarting the server.
+
+    Body: { "voice": "en-US-JennyNeural", "preview": true }
+    - voice: Edge-TTS voice name (required)
+    - preview: if true, synthesizes a sample sentence and returns the cache path (optional)
+
+    Does NOT affect calls currently in progress — takes effect on next call.
+    """
+    voice = request.get("voice", "").strip()
+    if not voice:
+        return {"error": "voice field is required"}
+
+    old_voice = tts_synthesizer.voice
+    tts_synthesizer.voice = voice
+    logger.info(f"🔊 TTS voice changed: {old_voice} → {voice}")
+
+    result = {
+        "status": "ok",
+        "previous_voice": old_voice,
+        "current_voice": voice,
+        "note": "Voice change takes effect on next call. Current calls are unaffected.",
+    }
+
+    # Optional: synthesize a preview sentence to hear the voice immediately
+    if request.get("preview", False):
+        preview_text = request.get(
+            "preview_text",
+            "Hello! Thank you for calling Unified Reach Fiber. How can I help you today?"
+        )
+        try:
+            wav_path = await tts_synthesizer.synthesize_awaitable(preview_text)
+            result["preview_wav"] = wav_path
+            result["preview_text"] = preview_text
+        except Exception as e:
+            result["preview_error"] = str(e)
+
+    return result
+
+
 # =============================================================================
 
 if __name__ == "__main__":
