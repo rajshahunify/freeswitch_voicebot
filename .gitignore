@@ -34,6 +34,3 @@ Thumbs.db
 
 # ── TTS cache (runtime generated) ──────────────────────────────────────────
 tts_cache/
-
-# ── Implementation plans docs ───────────────────────────────────────────────────
-implementation_plans/
